@@ -26,7 +26,6 @@ pub struct Channel {
 
 #[derive(Deserialize, Debug)]
 pub struct Item {
-    pub title: String,
     pub link: String,
     pub description: String,
     pub guid: String,
