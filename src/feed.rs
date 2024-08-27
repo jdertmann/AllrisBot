@@ -1,7 +1,5 @@
 use chrono::prelude::*;
-use reqwest::Client;
 use serde::{Deserialize, Deserializer};
-use thiserror::Error;
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Rss {
@@ -26,14 +24,6 @@ pub struct Channel {
     pub item: Vec<Item>,
 }
 
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("failed to retrieve feed: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("invalid feed format: {0}")]
-    ParseError(#[from] serde_xml_rs::Error),
-}
-
 #[derive(Deserialize, Debug)]
 pub struct Item {
     pub title: String,
@@ -42,8 +32,8 @@ pub struct Item {
     pub guid: String,
 }
 
-pub async fn fetch_feed(client: &Client, url: &str) -> Result<Channel, Error> {
-    let response = client.get(url).send().await?.text().await?;
+pub async fn fetch_feed(url: &str) -> Result<Channel, crate::Error> {
+    let response = reqwest::get(url).await?.text().await?;
     let rss: Rss = serde_xml_rs::from_str(&response)?;
     Ok(rss.channel)
 }

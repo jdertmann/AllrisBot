@@ -1,83 +1,104 @@
-use std::collections::HashSet;
-use std::sync::Arc;
+mod database;
+mod feed;
 
-use chrono::prelude::*;
+use std::collections::HashSet;
+
+use chrono::NaiveDate;
+use database::RedisClient;
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use teloxide::utils::command::BotCommands;
 use teloxide::utils::html;
-use tokio::sync::Mutex;
+use thiserror::Error;
 use tokio::time::{interval, Duration, MissedTickBehavior};
-
-mod feed;
 
 const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
 
-async fn feed_updater(bot: Bot, users: Arc<Mutex<HashSet<ChatId>>>) {
-    let client = reqwest::Client::new();
-    let pattern = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
-        .dot_matches_new_line(true)
-        .build()
-        .unwrap();
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("failed to retrieve feed: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("invalid feed format: {0}")]
+    ParseError(#[from] serde_xml_rs::Error),
+    #[error("redis error: {0}")]
+    RedisError(#[from] redis::RedisError),
+}
 
+fn generate_notification(item: &feed::Item) -> Option<String> {
+    lazy_static! {
+        static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
+            .dot_matches_new_line(true)
+            .build()
+            .unwrap();
+        static ref HYPERLINK_TEXT: String = html::escape("Zur Vorlage");
+        static ref BEFORE_HYPERLINK: String = html::escape("\n\n👉 ");
+    }
+
+    let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
+    let msg = html::bold(title) + &BEFORE_HYPERLINK + &html::link(&item.link, &HYPERLINK_TEXT);
+    Some(msg)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SavedState {
+    pub date: NaiveDate,
+    pub known_guids: HashSet<String>,
+}
+
+async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
+    let channel = feed::fetch_feed(FEED_URL).await?;
+    let current_date = channel.pub_date.date_naive();
+
+    if let Some(old_state) = redis.get_saved_state().await? {
+        let known_guids = if old_state.date == current_date {
+            old_state.known_guids
+        } else {
+            // Neuer Tag, neues Glück
+            HashSet::new()
+        };
+
+        for item in &channel.item {
+            if known_guids.contains(&item.guid) {
+                continue; // item already known
+            }
+
+            let Some(msg) = generate_notification(&item) else {
+                continue;
+            };
+
+            for user in redis.get_users().await? {
+                let request = bot.send_message(user, &msg).parse_mode(ParseMode::Html);
+
+                if let Err(e) = request.await {
+                    log::warn!("Sending notification failed: {e}");
+                    // TODO: Maybe retry or remove user from list
+                }
+            }
+        }
+    }
+
+    let known_guids: HashSet<_> = channel.item.into_iter().map(|x| x.guid).collect();
+    redis
+        .save_state(SavedState {
+            date: current_date,
+            known_guids,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn feed_updater(bot: Bot, redis: RedisClient) {
     let mut interval = interval(Duration::from_secs(300));
-    let mut saved: Option<(NaiveDate, HashSet<String>)> = None;
-
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
     loop {
         interval.tick().await;
-        log::info!("Doing update");
-
-        let channel = match feed::fetch_feed(&client, FEED_URL).await {
-            Ok(channel) => channel,
-            Err(e) => {
-                log::error!("Failed to retrieve feed: {e}");
-                continue;
-            }
-        };
-
-        let date = channel.pub_date.date_naive();
-
-        if let Some((old_date, known_guids)) = &mut saved {
-            if *old_date != date {
-                // neuer Tag, neues Glück
-                known_guids.clear()
-            }
-
-            for item in channel.item {
-                if !known_guids.insert(item.guid) {
-                    // item already known
-                    continue;
-                }
-                let title = match pattern
-                    .captures(&item.description)
-                    .map(|m| m.get(1))
-                    .flatten()
-                {
-                    Some(m) => m.as_str(),
-                    None => continue,
-                };
-
-                let msg = html::bold(title)
-                    + &html::escape("\n\n👉 ")
-                    + &html::link(&item.link, &html::escape("Zur Vorlage"));
-
-                let users = users.lock().await;
-                for user in users.iter() {
-                    let request = bot.send_message(*user, &msg).parse_mode(ParseMode::Html);
-
-                    if let Err(e) = request.await {
-                        log::warn!("Sending notification failed: {e}");
-                        // TODO: Maybe retry or remove user from list
-                    }
-                }
-            }
-
-            *old_date = date;
-        } else {
-            let known_guids = channel.item.into_iter().map(|x| x.guid).collect();
-            saved = Some((date, known_guids))
+        log::info!("Updating ...");
+        match do_update(&bot, &redis).await {
+            Ok(()) => log::info!("Update successful!"),
+            Err(e) => log::error!("Update failed: {e}"),
         }
     }
 }
@@ -101,32 +122,36 @@ async fn main() {
     env_logger::init();
 
     let bot = Bot::from_env();
-    let registered_users: Arc<Mutex<HashSet<ChatId>>> = Arc::new(Mutex::new(HashSet::new()));
+    let redis_client = database::RedisClient::new("redis://127.0.0.1/");
 
-    tokio::spawn(feed_updater(bot.clone(), Arc::clone(&registered_users)));
+    tokio::spawn(feed_updater(bot.clone(), redis_client.clone()));
 
     let answer = move |bot: Bot, msg: Message, cmd: Command| {
-        let registered_users = Arc::clone(&registered_users);
+        let redis_client = redis_client.clone();
         async move {
             match cmd {
                 Command::Start => {
-                    let mut users = registered_users.lock().await;
-                    let added = users.insert(msg.chat.id);
-                    let reply = if added {
-                        "Du hast dich erfolgreich für Benachrichtigungen registriert."
-                    } else {
-                        "Du bist bereits für Benachrichtigungen registriert."
+                    let reply = match redis_client.register_user(msg.chat.id).await {
+                        Ok(true) => "Du hast dich erfolgreich für Benachrichtigungen registriert.",
+                        Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
+                        Err(e) => {
+                            log::warn!("Database error: {e}");
+                            "Ein interner Fehler ist aufgetreten :(("
+                        }
                     };
+
                     bot.send_message(msg.chat.id, reply).await?;
                 }
                 Command::Stop => {
-                    let mut users = registered_users.lock().await;
-                    let removed = users.remove(&msg.chat.id);
-                    let reply = if removed {
-                        "Du hast die Benachrichtigungen abbestellt."
-                    } else {
-                        "Du warst nicht für Benachrichtigungen registriert."
+                    let reply = match redis_client.unregister_user(msg.chat.id).await {
+                        Ok(true) => "Du hast die Benachrichtigungen abbestellt.",
+                        Ok(false) => "Du warst nicht für Benachrichtigungen registriert.",
+                        Err(e) => {
+                            log::warn!("Database error: {e}");
+                            "Ein interner Fehler ist aufgetreten :(("
+                        }
                     };
+
                     bot.send_message(msg.chat.id, reply).await?;
                 }
                 Command::Help => {
