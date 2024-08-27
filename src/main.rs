@@ -87,14 +87,14 @@ async fn feed_updater(bot: Bot, users: Arc<Mutex<HashSet<ChatId>>>) {
 #[derive(BotCommands, Clone, Debug)]
 #[command(
     rename_rule = "lowercase",
-    description = "These commands are supported:"
+    description = "Diese Befehle werden unterstützt:"
 )]
 enum Command {
-    #[command(description = "register for notifications.")]
+    #[command(description = "für Benachrichtigungen registrieren.")]
     Start,
-    #[command(description = "unregister from notifications.")]
+    #[command(description = "Benachrichtigungen abbestellen.")]
     Stop,
-    #[command(description = "display this text.")]
+    #[command(description = "zeige diesen Text.")]
     Help,
 }
 
@@ -113,17 +113,21 @@ async fn main() {
             match cmd {
                 Command::Start => {
                     let mut users = registered_users.lock().await;
-                    users.insert(msg.chat.id);
-                    bot.send_message(msg.chat.id, "You have been registered for notifications.")
-                        .await?;
+                    let added = users.insert(msg.chat.id);
+                    let reply = if added {
+                        "Du hast dich erfolgreich für Benachrichtigungen registriert."
+                    } else {
+                        "Du bist bereits für Benachrichtigungen registriert."
+                    };
+                    bot.send_message(msg.chat.id, reply).await?;
                 }
                 Command::Stop => {
                     let mut users = registered_users.lock().await;
                     let removed = users.remove(&msg.chat.id);
                     let reply = if removed {
-                        "You have been unregistered from notifications."
+                        "Du hast die Benachrichtigungen abbestellt."
                     } else {
-                        "You were not registered for notifications."
+                        "Du warst nicht für Benachrichtigungen registriert."
                     };
                     bot.send_message(msg.chat.id, reply).await?;
                 }
