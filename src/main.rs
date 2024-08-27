@@ -59,17 +59,15 @@ async fn feed_updater(bot: Bot, users: Arc<Mutex<HashSet<ChatId>>>) {
                     None => continue,
                 };
 
-                let msg = html::escape("Eine neue Vorlage wurde veröffentlicht!\n\n")
-                    + &html::link(&item.link, &title);
+                let msg = html::bold(title)
+                    + &html::escape("\n\n👉 ")
+                    + &html::link(&item.link, &html::escape("Zur Vorlage"));
 
                 let users = users.lock().await;
                 for user in users.iter() {
-                    let result = bot
-                        .send_message(*user, &msg)
-                        .parse_mode(ParseMode::Html)
-                        .await;
+                    let request = bot.send_message(*user, &msg).parse_mode(ParseMode::Html);
 
-                    if let Err(e) = result {
+                    if let Err(e) = request.await {
                         log::warn!("Sending notification failed: {e}");
                         // TODO: Maybe retry or remove user from list
                     }
