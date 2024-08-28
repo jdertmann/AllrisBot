@@ -28,6 +28,7 @@ pub enum Error {
     #[error("redis error: {0}")]
     RedisError(#[from] redis::RedisError),
 }
+
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
         .dot_matches_new_line(true)
@@ -80,8 +81,9 @@ async fn generate_notification(client: &Client, item: &feed::Item) -> Option<Str
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
         (Some("Anregungen und Beschwerden"), _, _) => None,
+        (Some("Stellungnahme der Verwaltung"), _, Some(amt)) => Some(amt),
         (_, Some(verfasser), _) => Some(verfasser),
-        (_, _, Some(amt)) => Some(amt),
+        (_, None, Some(amt)) => Some(amt),
         _ => None,
     };
 
