@@ -93,6 +93,7 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
 
 async fn generate_notification(client: &Client, item: &feed::Item) -> Option<String> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
+    let dsnr = item.title.strip_prefix("Vorlage ");
     let [art, verfasser, amt, gremien] = scrape_website(client, &item.link).await;
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
@@ -118,6 +119,11 @@ async fn generate_notification(client: &Client, item: &feed::Item) -> Option<Str
     if let Some(gremien) = gremien {
         msg += "\n🏛️ ";
         msg += &html::escape(&gremien);
+    }
+
+    if let Some(dsnr) = dsnr {
+        msg += "\n📎 Ds.-Nr. ";
+        msg += &html::escape(&dsnr);
     }
 
     msg += &"\n👉 ";
