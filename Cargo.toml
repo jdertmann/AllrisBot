@@ -11,6 +11,7 @@ log = "0.4"
 redis = { version = "0.26", default-features = false, features = ["keep-alive", "tokio-comp", "json"] }
 regex = "1"
 reqwest = "0.12"
+scraper = { version = "0.20", default-features = false }
 serde = "1"
 serde_json = "1.0"
 serde-xml-rs = "0.6"

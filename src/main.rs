@@ -7,6 +7,8 @@ use std::future;
 use chrono::NaiveDate;
 use database::RedisClient;
 use lazy_static::lazy_static;
+use reqwest::Client;
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
@@ -26,19 +28,78 @@ pub enum Error {
     #[error("redis error: {0}")]
     RedisError(#[from] redis::RedisError),
 }
+lazy_static! {
+    static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
+        .dot_matches_new_line(true)
+        .build()
+        .unwrap();
+    static ref VOART_SELECTOR: Selector = Selector::parse("#voart").unwrap();
+    static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
+    static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
+}
 
-fn generate_notification(item: &feed::Item) -> Option<String> {
-    lazy_static! {
-        static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
-            .dot_matches_new_line(true)
-            .build()
-            .unwrap();
-        static ref HYPERLINK_TEXT: String = html::escape("Zur Vorlage");
-        static ref BEFORE_HYPERLINK: String = html::escape("\n\n👉 ");
+async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 3] {
+    async fn get_html(client: &Client, url: &str) -> reqwest::Result<String> {
+        client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await
     }
 
+    fn get_text(elem: ElementRef) -> String {
+        let mut text = String::new();
+        for s in elem.text() {
+            text += s;
+        }
+        return text;
+    }
+
+    let html = match get_html(client, url).await {
+        Ok(html) => html,
+        Err(e) => {
+            log::warn!("Unable to get site: {e}");
+            return Default::default();
+        }
+    };
+
+    let document = Html::parse_document(&html);
+
+    [
+        document.select(&VOART_SELECTOR).next().map(get_text),
+        document.select(&VOVERFASSER_SELECTOR).next().map(get_text),
+        document.select(&VOFAMT_SELECTOR).next().map(get_text),
+    ]
+}
+
+async fn generate_notification(client: &Client, item: &feed::Item) -> Option<String> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
-    let msg = html::bold(title) + &BEFORE_HYPERLINK + &html::link(&item.link, &HYPERLINK_TEXT);
+    let [art, verfasser, amt] = scrape_website(client, &item.link).await;
+
+    let verfasser = match (art.as_deref(), &verfasser, &amt) {
+        (Some("Anregungen und Beschwerden"), _, _) => None,
+        (_, Some(verfasser), _) => Some(verfasser),
+        (_, _, Some(amt)) => Some(amt),
+        _ => None,
+    };
+
+    let mut msg = html::bold(title) + "\n";
+
+    if let Some(art) = art {
+        msg += "\n📌 ";
+        msg += &html::escape(&art);
+    }
+
+    if let Some(verfasser) = verfasser {
+        msg += "\n👤 ";
+        msg += &html::escape(&verfasser);
+    }
+
+    msg += &"\n👉 ";
+    msg += &html::link(&item.link, &"Zur Vorlage");
+
     Some(msg)
 }
 
@@ -60,12 +121,14 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
             HashSet::new()
         };
 
+        let client = reqwest::Client::new();
+
         for item in &channel.item {
             if known_guids.contains(&item.guid) {
                 continue; // item already known
             }
 
-            let Some(msg) = generate_notification(&item) else {
+            let Some(msg) = generate_notification(&client, &item).await else {
                 continue;
             };
 
