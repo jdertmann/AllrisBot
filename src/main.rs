@@ -43,61 +43,69 @@ lazy_static! {
     static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
 }
 
-async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 5] {
-    async fn get_html(client: &Client, url: &str) -> reqwest::Result<String> {
-        client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await
-    }
+fn extract_text(element: ElementRef) -> String {
+    element
+        .text()
+        .collect::<Vec<_>>()
+        .concat()
+        .trim()
+        .to_string()
+}
 
-    fn get_text(elem: ElementRef) -> String {
-        let mut text = String::new();
-        for s in elem.text() {
-            text += s;
-        }
-        return text.trim().to_string();
-    }
+#[derive(Default)]
+struct WebsiteData {
+    url: Option<Url>,
+    art: Option<String>,
+    verfasser: Option<String>,
+    amt: Option<String>,
+    gremien: Vec<String>,
+    sammeldokument: Option<Url>,
+}
 
-    let html = match get_html(client, url).await {
-        Ok(html) => html,
-        Err(e) => {
-            log::warn!("Unable to get site: {e}");
-            return Default::default();
-        }
-    };
+async fn scrape_website_inner(client: &Client, url: Url) -> reqwest::Result<WebsiteData> {
+    let html = client
+        .get(url.clone())
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
 
     let document = Html::parse_document(&html);
 
     let gremien: Vec<_> = document
         .select(&GREMIEN_SELECTOR)
-        .map(get_text)
+        .map(extract_text)
         .filter(|s| !s.is_empty())
         .collect();
 
-    let sammeldokument: Option<String> = document
+    let sammeldokument: Option<Url> = document
         .select(&DOKUMENTE_SELECTOR)
         .find(|el| el.text().next() == Some("Sammeldokument"))
-        .map(|el| el.attr("href"))
-        .flatten()
-        .map(str::to_owned);
+        .and_then(|el| el.attr("href"))
+        .and_then(|s| url.join(s).ok());
 
-    let gremien = if gremien.is_empty() {
-        None
-    } else {
-        Some(gremien.join(" — "))
-    };
-
-    [
-        document.select(&VOART_SELECTOR).next().map(get_text),
-        document.select(&VOVERFASSER_SELECTOR).next().map(get_text),
-        document.select(&VOFAMT_SELECTOR).next().map(get_text),
+    Ok(WebsiteData {
+        url: Some(url),
+        art: document.select(&VOART_SELECTOR).next().map(extract_text),
+        verfasser: document
+            .select(&VOVERFASSER_SELECTOR)
+            .next()
+            .map(extract_text),
+        amt: document.select(&VOFAMT_SELECTOR).next().map(extract_text),
         gremien,
         sammeldokument,
-    ]
+    })
+}
+
+async fn scrape_website(client: &Client, url: &str) -> Option<WebsiteData> {
+    let url = Url::parse(url)
+        .inspect_err(|e| log::warn!("Invalid url: {e}"))
+        .ok()?;
+    scrape_website_inner(client, url)
+        .await
+        .inspect_err(|e| log::warn!("Unable to fetch website: {e}"))
+        .ok()
 }
 
 async fn generate_notification(
@@ -106,7 +114,15 @@ async fn generate_notification(
 ) -> Option<(String, Vec<InlineKeyboardButton>)> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
-    let [art, verfasser, amt, gremien, sammeldokument] = scrape_website(client, &item.link).await;
+
+    let WebsiteData {
+        url,
+        art,
+        verfasser,
+        amt,
+        gremien,
+        sammeldokument,
+    } = scrape_website(client, &item.link).await.unwrap_or_default();
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
         (Some("Anregungen und Beschwerden"), _, _) => None,
@@ -125,33 +141,22 @@ async fn generate_notification(
 
     if let Some(verfasser) = verfasser {
         msg += "\n👤 ";
-        msg += &html::escape(&verfasser);
+        msg += &html::escape(verfasser);
     }
 
-    if let Some(gremien) = gremien {
+    if !gremien.is_empty() {
         msg += "\n🏛️ ";
-        msg += &html::escape(&gremien);
+        msg += &html::escape(&gremien.join(" — "));
     }
 
     if let Some(dsnr) = dsnr {
         msg += "\n📎 Ds.-Nr. ";
-        msg += &html::escape(&dsnr);
+        msg += &html::escape(dsnr);
     }
 
-    let buttons = if let Ok(url) = Url::parse(&item.link) {
-        let button2 = sammeldokument
-            .as_deref()
-            .map(|s| url.join(s))
-            .map(Result::ok)
-            .flatten()
-            .map(|url| InlineKeyboardButton::url("📄 Sammeldokument", url));
-
-        let mut buttons = vec![InlineKeyboardButton::url("🌐 Allris", url)];
-        buttons.extend(button2);
-        buttons
-    } else {
-        Vec::new()
-    };
+    let button1 = url.map(|url| InlineKeyboardButton::url("🌐 Allris", url));
+    let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 Sammeldokument", url));
+    let buttons = [button1, button2].into_iter().flatten().collect();
 
     Some((msg, buttons))
 }
@@ -160,6 +165,50 @@ async fn generate_notification(
 pub struct SavedState {
     pub date: NaiveDate,
     pub known_guids: HashSet<String>,
+}
+
+async fn send_message(
+    bot: &Bot,
+    chat: ChatId,
+    msg: &str,
+    buttons: &[InlineKeyboardButton],
+) -> Result<(), Option<ChatId>> {
+    let mut request = bot.send_message(chat, msg).parse_mode(ParseMode::Html);
+
+    if !buttons.is_empty() {
+        request = request.reply_markup(InlineKeyboardMarkup::new(vec![buttons.to_owned()]));
+    }
+
+    if let Err(e) = request.await {
+        log::warn!("Sending notification failed: {e}");
+        use teloxide::ApiError::*;
+        use teloxide::RequestError::*;
+        match e {
+            Api(e) => match e {
+                BotBlocked
+                | ChatNotFound
+                | GroupDeactivated
+                | BotKicked
+                | BotKickedFromSupergroup
+                | UserDeactivated
+                | CantInitiateConversation
+                | CantTalkWithBots => return Err(None),
+                Unknown(e) if &e == "Forbidden: bot was kicked from the channel chat" => {
+                    return Err(None)
+                }
+                InvalidToken | MessageTextIsEmpty | MessageIsTooLong | ButtonUrlInvalid
+                | CantParseEntities(_) | WrongHttpUrl | _ => (),
+            },
+            MigrateToChatId(c) => {
+                return Err(Some(c));
+            }
+            RetryAfter(secs) => {
+                tokio::time::sleep(secs.duration()).await;
+            }
+            _ => (),
+        }
+    }
+    Ok(())
 }
 
 async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
@@ -181,21 +230,19 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
                 continue; // item already known
             }
 
-            let Some((msg, buttons)) = generate_notification(&client, &item).await else {
+            let Some((msg, buttons)) = generate_notification(&client, item).await else {
                 continue;
             };
 
-            for user in redis.get_users().await? {
-                let mut request = bot.send_message(user, &msg).parse_mode(ParseMode::Html);
+            let users = redis.get_users().await?;
 
-                if !buttons.is_empty() {
-                    request =
-                        request.reply_markup(InlineKeyboardMarkup::new(vec![buttons.clone()]));
-                }
-
-                if let Err(e) = request.await {
-                    log::warn!("Sending notification failed: {e}");
-                    // TODO: Maybe retry or remove user from list
+            for user in users {
+                if let Err(new_chat) = send_message(bot, user, &msg, &buttons).await {
+                    let _ = redis.unregister_user(user).await;
+                    if let Some(new_chat) = new_chat {
+                        let _ = redis.register_user(new_chat).await;
+                        let _ = send_message(bot, new_chat, &msg, &buttons).await;
+                    }
                 }
             }
         }
@@ -239,6 +286,70 @@ enum Command {
     Help,
 }
 
+async fn handle_message(
+    bot: Bot,
+    msg: Message,
+    cmd: Command,
+    redis_client: RedisClient,
+) -> ResponseResult<()> {
+    match cmd {
+        Command::Start => {
+            let reply = match redis_client.register_user(msg.chat.id).await {
+                Ok(true) => "Du hast dich erfolgreich für Benachrichtigungen registriert.",
+                Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
+                Err(e) => {
+                    log::warn!("Database error: {e}");
+                    "Ein interner Fehler ist aufgetreten :(("
+                }
+            };
+
+            bot.send_message(msg.chat.id, reply).await?;
+        }
+        Command::Stop => {
+            let reply = match redis_client.unregister_user(msg.chat.id).await {
+                Ok(true) => "Du hast die Benachrichtigungen abbestellt.",
+                Ok(false) => "Du warst nicht für Benachrichtigungen registriert.",
+                Err(e) => {
+                    log::warn!("Database error: {e}");
+                    "Ein interner Fehler ist aufgetreten :(("
+                }
+            };
+
+            bot.send_message(msg.chat.id, reply).await?;
+        }
+        Command::Help => {
+            bot.send_message(msg.chat.id, Command::descriptions().to_string())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_update_perm(
+    update: ChatMemberUpdated,
+    redis_client: RedisClient,
+) -> ResponseResult<()> {
+    if update.new_chat_member.can_post_messages() {
+        match redis_client.register_user(update.chat.id).await {
+            Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),
+            Err(e) => log::error!(
+                "Adding channel \"{}\" failed: {e}",
+                update.chat.title().unwrap_or("<unknown>")
+            ),
+        }
+    } else {
+        match redis_client.unregister_user(update.chat.id).await {
+            Ok(_) => log::info!("Removed channel \"{}\"", update.chat.title().unwrap_or("")),
+            Err(e) => log::error!(
+                "Removing channel \"{}\" failed: {e}",
+                update.chat.title().unwrap_or("<unknown>")
+            ),
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -248,68 +359,6 @@ async fn main() {
 
     tokio::spawn(feed_updater(bot.clone(), redis_client.clone()));
 
-    let answer = move |bot: Bot, msg: Message, cmd: Command, redis_client: RedisClient| {
-        let redis_client = redis_client.clone();
-        async move {
-            match cmd {
-                Command::Start => {
-                    let reply = match redis_client.register_user(msg.chat.id).await {
-                        Ok(true) => "Du hast dich erfolgreich für Benachrichtigungen registriert.",
-                        Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
-                        Err(e) => {
-                            log::warn!("Database error: {e}");
-                            "Ein interner Fehler ist aufgetreten :(("
-                        }
-                    };
-
-                    bot.send_message(msg.chat.id, reply).await?;
-                }
-                Command::Stop => {
-                    let reply = match redis_client.unregister_user(msg.chat.id).await {
-                        Ok(true) => "Du hast die Benachrichtigungen abbestellt.",
-                        Ok(false) => "Du warst nicht für Benachrichtigungen registriert.",
-                        Err(e) => {
-                            log::warn!("Database error: {e}");
-                            "Ein interner Fehler ist aufgetreten :(("
-                        }
-                    };
-
-                    bot.send_message(msg.chat.id, reply).await?;
-                }
-                Command::Help => {
-                    bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                        .await?;
-                }
-            };
-            Ok(()) as ResponseResult<()>
-        }
-    };
-
-    let channel_perm_changed = move |upd: ChatMemberUpdated, redis_client: RedisClient| {
-        let redis_client = redis_client.clone();
-        async move {
-            if upd.new_chat_member.can_post_messages() {
-                match redis_client.register_user(upd.chat.id).await {
-                    Ok(_) => log::info!("Added channel \"{}\"", upd.chat.title().unwrap_or("")),
-                    Err(e) => log::error!(
-                        "Adding channel \"{}\" failed: {e}",
-                        upd.chat.title().unwrap_or("")
-                    ),
-                }
-            } else {
-                match redis_client.unregister_user(upd.chat.id).await {
-                    Ok(_) => log::info!("Removed channel \"{}\"", upd.chat.title().unwrap_or("")),
-                    Err(e) => log::error!(
-                        "Removing channel \"{}\" failed: {e}",
-                        upd.chat.title().unwrap_or("")
-                    ),
-                }
-            }
-
-            Ok(())
-        }
-    };
-
     let handler = dptree::entry()
         .inspect(|u: Update| {
             log::debug!("{u:#?}"); // Print the update to the console with inspect
@@ -317,7 +366,7 @@ async fn main() {
         .branch(
             Update::filter_message()
                 .filter_command::<Command>()
-                .endpoint(answer),
+                .endpoint(handle_message),
         )
         .branch(
             Update::filter_my_chat_member()
@@ -326,7 +375,7 @@ async fn main() {
                         && x.old_chat_member.can_post_messages()
                             != x.new_chat_member.can_post_messages()
                 })
-                .endpoint(channel_perm_changed),
+                .endpoint(handle_update_perm),
         );
 
     Dispatcher::builder(bot, handler)
