@@ -7,11 +7,11 @@ use std::future;
 use chrono::NaiveDate;
 use database::RedisClient;
 use lazy_static::lazy_static;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use teloxide::utils::command::BotCommands;
 use teloxide::utils::html;
 use thiserror::Error;
@@ -40,9 +40,10 @@ lazy_static! {
     static ref VOART_SELECTOR: Selector = Selector::parse("#voart").unwrap();
     static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
     static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
+    static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
 }
 
-async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
+async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 5] {
     async fn get_html(client: &Client, url: &str) -> reqwest::Result<String> {
         client
             .get(url)
@@ -77,6 +78,13 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
         .filter(|s| !s.is_empty())
         .collect();
 
+    let sammeldokument: Option<String> = document
+        .select(&DOKUMENTE_SELECTOR)
+        .find(|el| el.text().next() == Some("Sammeldokument"))
+        .map(|el| el.attr("href"))
+        .flatten()
+        .map(str::to_owned);
+
     let gremien = if gremien.is_empty() {
         None
     } else {
@@ -88,13 +96,17 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
         document.select(&VOVERFASSER_SELECTOR).next().map(get_text),
         document.select(&VOFAMT_SELECTOR).next().map(get_text),
         gremien,
+        sammeldokument,
     ]
 }
 
-async fn generate_notification(client: &Client, item: &feed::Item) -> Option<String> {
+async fn generate_notification(
+    client: &Client,
+    item: &feed::Item,
+) -> Option<(String, Vec<InlineKeyboardButton>)> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
-    let [art, verfasser, amt, gremien] = scrape_website(client, &item.link).await;
+    let [art, verfasser, amt, gremien, sammeldokument] = scrape_website(client, &item.link).await;
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
         (Some("Anregungen und Beschwerden"), _, _) => None,
@@ -126,10 +138,22 @@ async fn generate_notification(client: &Client, item: &feed::Item) -> Option<Str
         msg += &html::escape(&dsnr);
     }
 
-    msg += &"\n👉 ";
-    msg += &html::escape(&item.link);
+    let buttons = if let Ok(url) = Url::parse(&item.link) {
+        let button2 = sammeldokument
+            .as_deref()
+            .map(|s| url.join(s))
+            .map(Result::ok)
+            .flatten()
+            .map(|url| InlineKeyboardButton::url("📄 Sammeldokument", url));
 
-    Some(msg)
+        let mut buttons = vec![InlineKeyboardButton::url("🌐 Allris", url)];
+        buttons.extend(button2);
+        buttons
+    } else {
+        Vec::new()
+    };
+
+    Some((msg, buttons))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,12 +181,17 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
                 continue; // item already known
             }
 
-            let Some(msg) = generate_notification(&client, &item).await else {
+            let Some((msg, buttons)) = generate_notification(&client, &item).await else {
                 continue;
             };
 
             for user in redis.get_users().await? {
-                let request = bot.send_message(user, &msg).parse_mode(ParseMode::Html);
+                let mut request = bot.send_message(user, &msg).parse_mode(ParseMode::Html);
+
+                if !buttons.is_empty() {
+                    request =
+                        request.reply_markup(InlineKeyboardMarkup::new(vec![buttons.clone()]));
+                }
 
                 if let Err(e) = request.await {
                     log::warn!("Sending notification failed: {e}");
