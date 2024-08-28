@@ -2,6 +2,7 @@ mod database;
 mod feed;
 
 use std::collections::HashSet;
+use std::future;
 
 use chrono::NaiveDate;
 use database::RedisClient;
@@ -126,7 +127,7 @@ async fn main() {
 
     tokio::spawn(feed_updater(bot.clone(), redis_client.clone()));
 
-    let answer = move |bot: Bot, msg: Message, cmd: Command| {
+    let answer = move |bot: Bot, msg: Message, cmd: Command, redis_client: RedisClient| {
         let redis_client = redis_client.clone();
         async move {
             match cmd {
@@ -159,9 +160,62 @@ async fn main() {
                         .await?;
                 }
             };
+            Ok(()) as ResponseResult<()>
+        }
+    };
+
+    let channel_perm_changed = move |upd: ChatMemberUpdated, redis_client: RedisClient| {
+        let redis_client = redis_client.clone();
+        async move {
+            if upd.new_chat_member.can_post_messages() {
+                match redis_client.register_user(upd.chat.id).await {
+                    Ok(_) => log::info!("Added channel \"{}\"", upd.chat.title().unwrap_or("")),
+                    Err(e) => log::error!(
+                        "Adding channel \"{}\" failed: {e}",
+                        upd.chat.title().unwrap_or("")
+                    ),
+                }
+            } else {
+                match redis_client.unregister_user(upd.chat.id).await {
+                    Ok(_) => log::info!("Removed channel \"{}\"", upd.chat.title().unwrap_or("")),
+                    Err(e) => log::error!(
+                        "Removing channel \"{}\" failed: {e}",
+                        upd.chat.title().unwrap_or("")
+                    ),
+                }
+            }
+
             Ok(())
         }
     };
 
-    Command::repl(bot, answer).await;
+    let handler = dptree::entry()
+        .inspect(|u: Update| {
+            log::debug!("{u:#?}"); // Print the update to the console with inspect
+        })
+        .branch(
+            Update::filter_message()
+                .filter_command::<Command>()
+                .endpoint(answer),
+        )
+        .branch(
+            Update::filter_my_chat_member()
+                .filter(|x: ChatMemberUpdated| {
+                    x.chat.is_channel()
+                        && x.old_chat_member.can_post_messages()
+                            != x.new_chat_member.can_post_messages()
+                })
+                .endpoint(channel_perm_changed),
+        );
+
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![redis_client])
+        .error_handler(LoggingErrorHandler::with_custom_text(
+            "An error has occurred in the dispatcher",
+        ))
+        .default_handler(|_| future::ready(()))
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 }
