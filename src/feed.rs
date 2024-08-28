@@ -21,6 +21,7 @@ where
 pub struct Channel {
     #[serde(deserialize_with = "deserialize_rfc2822")]
     pub pub_date: DateTime<FixedOffset>,
+    #[serde(default)]
     pub item: Vec<Item>,
 }
 
