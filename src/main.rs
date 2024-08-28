@@ -34,12 +34,15 @@ lazy_static! {
         .dot_matches_new_line(true)
         .build()
         .unwrap();
+    static ref GREMIEN_SELECTOR: Selector =
+        Selector::parse("#bfTable > table > tbody > tr > td:not(.date) + td:nth-of-type(3)")
+            .unwrap();
     static ref VOART_SELECTOR: Selector = Selector::parse("#voart").unwrap();
     static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
     static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
 }
 
-async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 3] {
+async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
     async fn get_html(client: &Client, url: &str) -> reqwest::Result<String> {
         client
             .get(url)
@@ -55,7 +58,7 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 3] {
         for s in elem.text() {
             text += s;
         }
-        return text;
+        return text.trim().to_string();
     }
 
     let html = match get_html(client, url).await {
@@ -68,16 +71,29 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 3] {
 
     let document = Html::parse_document(&html);
 
+    let gremien: Vec<_> = document
+        .select(&GREMIEN_SELECTOR)
+        .map(get_text)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let gremien = if gremien.is_empty() {
+        None
+    } else {
+        Some(gremien.join(", "))
+    };
+
     [
         document.select(&VOART_SELECTOR).next().map(get_text),
         document.select(&VOVERFASSER_SELECTOR).next().map(get_text),
         document.select(&VOFAMT_SELECTOR).next().map(get_text),
+        gremien,
     ]
 }
 
 async fn generate_notification(client: &Client, item: &feed::Item) -> Option<String> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
-    let [art, verfasser, amt] = scrape_website(client, &item.link).await;
+    let [art, verfasser, amt, gremien] = scrape_website(client, &item.link).await;
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
         (Some("Anregungen und Beschwerden"), _, _) => None,
@@ -97,6 +113,11 @@ async fn generate_notification(client: &Client, item: &feed::Item) -> Option<Str
     if let Some(verfasser) = verfasser {
         msg += "\n👤 ";
         msg += &html::escape(&verfasser);
+    }
+
+    if let Some(gremien) = gremien {
+        msg += "\n🏛️ ";
+        msg += &html::escape(&gremien);
     }
 
     msg += &"\n👉 ";
