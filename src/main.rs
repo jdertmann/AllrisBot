@@ -80,7 +80,7 @@ async fn scrape_website(client: &Client, url: &str) -> [Option<String>; 4] {
     let gremien = if gremien.is_empty() {
         None
     } else {
-        Some(gremien.join(", "))
+        Some(gremien.join(" — "))
     };
 
     [
@@ -127,7 +127,7 @@ async fn generate_notification(client: &Client, item: &feed::Item) -> Option<Str
     }
 
     msg += &"\n👉 ";
-    msg += &html::link(&item.link, &"Zur Vorlage");
+    msg += &html::escape(&item.link);
 
     Some(msg)
 }
