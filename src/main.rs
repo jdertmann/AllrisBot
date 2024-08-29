@@ -4,8 +4,10 @@ mod updater;
 
 #[cfg(feature = "handle_updates")]
 mod dispatcher;
+
 use teloxide::Bot;
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
 
@@ -28,15 +30,36 @@ async fn main() {
     let bot = Bot::from_env();
     let redis_client = database::RedisClient::new("redis://127.0.0.1/");
 
+    let shutdown_dispatcher;
+
     #[cfg(feature = "handle_updates")]
     {
-        tokio::spawn(updater::feed_updater(bot.clone(), redis_client.clone()));
-
-        dispatcher::dispatch(bot, redis_client).await;
+        let mut dispatcher = dispatcher::create(bot.clone(), redis_client.clone());
+        let shutdown_token = dispatcher.shutdown_token();
+        tokio::spawn(async move { dispatcher.dispatch().await });
+        shutdown_dispatcher = || async move {
+            if let Ok(f) = shutdown_token.shutdown() {
+                f.await
+            }
+        };
     }
 
     #[cfg(not(feature = "handle_updates"))]
-    updater::feed_updater(bot, redis_client).await
+    {
+        shutdown_dispatcher = || std::future::ready(());
+    }
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let updater_handle = tokio::spawn(updater::feed_updater(bot, redis_client, shutdown_rx));
+
+    match tokio::signal::ctrl_c().await {
+        Ok(_) => (),
+        Err(e) => log::error!("Unable to listen for shutdown signal: {e}"),
+    }
+
+    log::info!("Shutting down ...");
+    let _ = shutdown_tx.send(());
+    let _ = tokio::join!(shutdown_dispatcher(), updater_handle);
 }
 
 // As soon as this fails, the error handling in `send_message` must be adapted

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use teloxide::utils::html;
+use tokio::sync::oneshot;
 use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
@@ -256,12 +257,16 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn feed_updater(bot: Bot, redis: RedisClient) {
+pub async fn feed_updater(bot: Bot, redis: RedisClient, mut shutdown: oneshot::Receiver<()>) {
     let mut interval = interval(Duration::from_secs(300));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = interval.tick() => ()
+        };
+
         log::info!("Updating ...");
         match do_update(&bot, &redis).await {
             Ok(()) => log::info!("Update finished!"),

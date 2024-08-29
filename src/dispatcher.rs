@@ -95,7 +95,10 @@ async fn handle_perm_update(
     Ok(())
 }
 
-pub async fn dispatch(bot: Bot, redis_client: RedisClient) {
+pub fn create(
+    bot: Bot,
+    redis_client: RedisClient,
+) -> Dispatcher<Bot, teloxide::RequestError, teloxide::dispatching::DefaultKey> {
     let handler = dptree::entry()
         .inspect(|u: Update| log::debug!("{u:#?}"))
         .branch(
@@ -115,8 +118,5 @@ pub async fn dispatch(bot: Bot, redis_client: RedisClient) {
             "An error has occurred in the dispatcher",
         ))
         .default_handler(|_| async {})
-        .enable_ctrlc_handler()
         .build()
-        .dispatch()
-        .await;
 }
