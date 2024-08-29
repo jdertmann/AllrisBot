@@ -25,9 +25,9 @@ async fn handle_message(
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start => {
-            let reply = match redis_client.register_user(msg.chat.id).await {
+            let reply = match redis_client.register_chat(msg.chat.id).await {
                 Ok(true) => {
-                    log::info!("User {} registered", msg.chat.id);
+                    log::info!("Chat {} registered", msg.chat.id);
                     "Du hast dich erfolgreich für Benachrichtigungen registriert."
                 }
                 Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
@@ -40,9 +40,9 @@ async fn handle_message(
             bot.send_message(msg.chat.id, reply).await?;
         }
         Command::Stop => {
-            let reply = match redis_client.unregister_user(msg.chat.id).await {
+            let reply = match redis_client.unregister_chat(msg.chat.id).await {
                 Ok(true) => {
-                    log::info!("User {} unregistered", msg.chat.id);
+                    log::info!("Chat {} unregistered", msg.chat.id);
                     "Du hast die Benachrichtigungen abbestellt."
                 }
                 Ok(false) => "Du warst nicht für Benachrichtigungen registriert.",
@@ -75,7 +75,7 @@ async fn handle_perm_update(
     redis_client: RedisClient,
 ) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
-        match redis_client.register_user(update.chat.id).await {
+        match redis_client.register_chat(update.chat.id).await {
             Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Adding channel \"{}\" failed: {e}",
@@ -83,7 +83,7 @@ async fn handle_perm_update(
             ),
         }
     } else {
-        match redis_client.unregister_user(update.chat.id).await {
+        match redis_client.unregister_chat(update.chat.id).await {
             Ok(_) => log::info!("Removed channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Removing channel \"{}\" failed: {e}",

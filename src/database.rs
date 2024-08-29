@@ -5,7 +5,7 @@ use teloxide::types::ChatId;
 
 use crate::updater::SavedState;
 
-const REGISTERED_USERS_KEY: &str = "allrisbot:registered_users";
+const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_users";
 const SAVED_KEY: &str = "allrisbot:saved_state";
 
 #[derive(Clone)]
@@ -19,21 +19,21 @@ impl RedisClient {
         Ok(RedisClient { client })
     }
 
-    pub async fn register_user(&self, chat_id: ChatId) -> redis::RedisResult<bool> {
+    pub async fn register_chat(&self, chat_id: ChatId) -> redis::RedisResult<bool> {
         let mut con = self.client.get_multiplexed_async_connection().await?;
-        let added = con.sadd(REGISTERED_USERS_KEY, chat_id.0).await?;
+        let added = con.sadd(REGISTERED_CHATS_KEY, chat_id.0).await?;
         Ok(added)
     }
 
-    pub async fn unregister_user(&self, chat_id: ChatId) -> redis::RedisResult<bool> {
+    pub async fn unregister_chat(&self, chat_id: ChatId) -> redis::RedisResult<bool> {
         let mut con = self.client.get_multiplexed_async_connection().await?;
-        let removed = con.srem(REGISTERED_USERS_KEY, chat_id.0).await?;
+        let removed = con.srem(REGISTERED_CHATS_KEY, chat_id.0).await?;
         Ok(removed)
     }
 
-    pub async fn get_users(&self) -> redis::RedisResult<BTreeSet<ChatId>> {
+    pub async fn get_chats(&self) -> redis::RedisResult<BTreeSet<ChatId>> {
         let mut con = self.client.get_multiplexed_async_connection().await?;
-        let user_ids: BTreeSet<i64> = con.smembers(REGISTERED_USERS_KEY).await?;
+        let user_ids: BTreeSet<i64> = con.smembers(REGISTERED_CHATS_KEY).await?;
         Ok(user_ids.into_iter().map(ChatId).collect())
     }
 

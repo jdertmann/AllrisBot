@@ -233,15 +233,15 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
                 continue;
             };
 
-            for user in redis.get_users().await? {
+            for user in redis.get_chats().await? {
                 match send_message(bot, user, &msg, &buttons).await {
                     UpdateChatId::Keep => (),
                     UpdateChatId::Remove => {
-                        let _ = redis.unregister_user(user).await;
+                        let _ = redis.unregister_chat(user).await;
                     }
                     UpdateChatId::Migrate(c) => {
-                        let _ = redis.unregister_user(user).await;
-                        let _ = redis.register_user(c).await;
+                        let _ = redis.unregister_chat(user).await;
+                        let _ = redis.register_chat(c).await;
                     }
                 }
             }
