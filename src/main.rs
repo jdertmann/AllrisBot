@@ -80,7 +80,7 @@ async fn main() -> ExitCode {
 #[test]
 #[cfg(feature = "handle_updates")]
 fn test_api_error_not_yet_added() {
-    use teloxide_core::ApiError;
+    use teloxide::ApiError;
 
     const ERROR_MSG: &str = "Forbidden: bot was kicked from the channel chat";
     let api_error: ApiError = serde_json::from_str(&format!("\"{ERROR_MSG}\"")).unwrap();
