@@ -2,13 +2,11 @@ use chrono::prelude::*;
 use serde::{Deserialize, Deserializer};
 
 #[derive(Deserialize, Debug)]
-pub(crate) struct Rss {
-    pub(crate) channel: Channel,
+struct Rss {
+    channel: Channel,
 }
 
-pub(crate) fn deserialize_rfc2822<'de, D>(
-    deserializer: D,
-) -> Result<DateTime<FixedOffset>, D::Error>
+fn deserialize_rfc2822<'de, D>(deserializer: D) -> Result<DateTime<FixedOffset>, D::Error>
 where
     D: Deserializer<'de>,
 {
