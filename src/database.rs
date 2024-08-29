@@ -7,6 +7,7 @@ use crate::updater::SavedState;
 
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_users";
 const SAVED_KEY: &str = "allrisbot:saved_state";
+const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 
 #[derive(Clone)]
 pub struct RedisClient {
@@ -53,5 +54,10 @@ impl RedisClient {
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn add_item(&self, item: &str) -> redis::RedisResult<bool> {
+        let mut con = self.client.get_multiplexed_async_connection().await?;
+        con.sadd(KNOWN_ITEMS_KEY, item).await
     }
 }

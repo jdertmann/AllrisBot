@@ -225,8 +225,24 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
         let client = reqwest::Client::new();
 
         for item in &channel.item {
+            let Some(volfdnr) = item
+                .link
+                .strip_prefix("https://www.bonn.sitzung-online.de/vo020?VOLFDNR=")
+            else {
+                log::warn!(
+                    "Link deviates from the usual pattern, skipping: {}",
+                    item.link
+                );
+                continue;
+            };
+
+            // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
+            if !redis.add_item(volfdnr).await? {
+                continue; // item already known (new version)
+            }
+
             if known_guids.contains(&item.guid) {
-                continue; // item already known
+                continue; // item already known (old version)
             }
 
             let Some((msg, buttons)) = generate_notification(&client, item).await else {
