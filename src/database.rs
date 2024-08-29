@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use redis::AsyncCommands;
 use teloxide::types::ChatId;
 
-use crate::SavedState;
+use crate::updater::SavedState;
 
 const REGISTERED_USERS_KEY: &str = "allrisbot:registered_users";
 const SAVED_KEY: &str = "allrisbot:saved_state";
