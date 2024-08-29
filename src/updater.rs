@@ -14,7 +14,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
 use crate::database::RedisClient;
-use crate::{feed, Error, FEED_URL};
+use crate::{Error, FEED_URL};
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -28,6 +28,31 @@ lazy_static! {
     static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
     static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
     static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
+}
+
+#[derive(Deserialize, Debug)]
+struct Rss {
+    channel: Channel,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Channel {
+    #[serde(default)]
+    pub item: Vec<Item>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Item {
+    pub title: String,
+    pub link: String,
+    pub description: String,
+}
+
+pub async fn fetch_feed(url: &str) -> Result<Channel, crate::Error> {
+    let response = reqwest::get(url).await?.text().await?;
+    let rss: Rss = serde_xml_rs::from_str(&response)?;
+    Ok(rss.channel)
 }
 
 fn extract_text(element: ElementRef) -> String {
@@ -90,7 +115,7 @@ async fn scrape_website(client: &Client, url: &str) -> Result<WebsiteData, Error
 }
 async fn generate_notification(
     client: &Client,
-    item: &feed::Item,
+    item: &Item,
 ) -> Option<(String, Vec<InlineKeyboardButton>)> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
@@ -211,64 +236,43 @@ async fn send_message(
 }
 
 async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
-    let channel = feed::fetch_feed(FEED_URL).await?;
-    let current_date = channel.pub_date.date_naive();
+    let channel = fetch_feed(FEED_URL).await?;
+    let client = reqwest::Client::new();
 
-    if let Some(old_state) = redis.get_saved_state().await? {
-        let known_guids = if old_state.date == current_date {
-            old_state.known_guids
-        } else {
-            // Neuer Tag, neues Glück
-            HashSet::new()
+    for item in &channel.item {
+        let Some(volfdnr) = item
+            .link
+            .strip_prefix("https://www.bonn.sitzung-online.de/vo020?VOLFDNR=")
+        else {
+            log::warn!(
+                "Link deviates from the usual pattern, skipping: {}",
+                item.link
+            );
+            continue;
         };
 
-        let client = reqwest::Client::new();
+        // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
+        if !redis.add_item(volfdnr).await? {
+            continue; // item already known (new version)
+        }
 
-        for item in &channel.item {
-            let Some(volfdnr) = item
-                .link
-                .strip_prefix("https://www.bonn.sitzung-online.de/vo020?VOLFDNR=")
-            else {
-                log::warn!(
-                    "Link deviates from the usual pattern, skipping: {}",
-                    item.link
-                );
-                continue;
-            };
+        let Some((msg, buttons)) = generate_notification(&client, item).await else {
+            continue;
+        };
 
-            // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
-            if !redis.add_item(volfdnr).await? {
-                continue; // item already known (new version)
-            }
-
-            if known_guids.contains(&item.guid) {
-                continue; // item already known (old version)
-            }
-
-            let Some((msg, buttons)) = generate_notification(&client, item).await else {
-                continue;
-            };
-
-            for user in redis.get_chats().await? {
-                match send_message(bot, user, &msg, &buttons).await {
-                    UpdateChatId::Keep => (),
-                    UpdateChatId::Remove => {
-                        let _ = redis.unregister_chat(user).await;
-                    }
-                    UpdateChatId::Migrate(c) => {
-                        let _ = redis.unregister_chat(user).await;
-                        let _ = redis.register_chat(c).await;
-                    }
+        for user in redis.get_chats().await? {
+            match send_message(bot, user, &msg, &buttons).await {
+                UpdateChatId::Keep => (),
+                UpdateChatId::Remove => {
+                    let _ = redis.unregister_chat(user).await;
+                }
+                UpdateChatId::Migrate(c) => {
+                    let _ = redis.unregister_chat(user).await;
+                    let _ = redis.register_chat(c).await;
                 }
             }
         }
     }
-
-    let new_state = SavedState {
-        date: current_date,
-        known_guids: channel.item.into_iter().map(|x| x.guid).collect(),
-    };
-    redis.save_state(new_state).await?;
 
     Ok(())
 }

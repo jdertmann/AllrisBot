@@ -3,10 +3,7 @@ use std::collections::BTreeSet;
 use redis::{AsyncCommands, RedisResult};
 use teloxide::types::ChatId;
 
-use crate::updater::SavedState;
-
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_users";
-const SAVED_KEY: &str = "allrisbot:saved_state";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 
 #[derive(Clone)]
@@ -36,24 +33,6 @@ impl RedisClient {
         let mut con = self.client.get_multiplexed_async_connection().await?;
         let user_ids: BTreeSet<i64> = con.smembers(REGISTERED_CHATS_KEY).await?;
         Ok(user_ids.into_iter().map(ChatId).collect())
-    }
-
-    pub async fn save_state(&self, state: SavedState) -> redis::RedisResult<()> {
-        let mut con = self.client.get_multiplexed_async_connection().await?;
-        let serialized_state = serde_json::to_string(&state)?;
-        con.set(SAVED_KEY, serialized_state).await?;
-        Ok(())
-    }
-
-    pub async fn get_saved_state(&self) -> redis::RedisResult<Option<SavedState>> {
-        let mut con = self.client.get_multiplexed_async_connection().await?;
-        let serialized_state: Option<String> = con.get(SAVED_KEY).await?;
-        if let Some(serialized_state) = serialized_state {
-            let state: SavedState = serde_json::from_str(&serialized_state)?;
-            Ok(Some(state))
-        } else {
-            Ok(None)
-        }
     }
 
     pub async fn add_item(&self, item: &str) -> redis::RedisResult<bool> {

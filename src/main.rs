@@ -1,5 +1,4 @@
 mod database;
-mod feed;
 mod updater;
 
 #[cfg(feature = "handle_updates")]
