@@ -1,11 +1,9 @@
-use std::collections::HashSet;
 use std::time::Duration;
 
-use chrono::NaiveDate;
 use lazy_static::lazy_static;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use teloxide::utils::html;
@@ -167,12 +165,6 @@ async fn generate_notification(
     let buttons = [button1, button2].into_iter().flatten().collect();
 
     Some((msg, buttons))
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SavedState {
-    pub date: NaiveDate,
-    pub known_guids: HashSet<String>,
 }
 
 enum UpdateChatId {
