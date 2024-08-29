@@ -128,7 +128,7 @@ async fn generate_notification(
 
     if !gremien.is_empty() {
         msg += "\n🏛️ ";
-        msg += &html::escape(&gremien.join(" — "));
+        msg += &html::escape(&gremien.join(" | "));
     }
 
     if let Some(dsnr) = dsnr {
@@ -137,7 +137,7 @@ async fn generate_notification(
     }
 
     let button1 = url.map(|url| InlineKeyboardButton::url("🌐 Allris", url));
-    let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 Sammeldokument", url));
+    let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 PDF", url));
     let buttons = [button1, button2].into_iter().flatten().collect();
 
     Some((msg, buttons))
