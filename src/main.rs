@@ -5,6 +5,9 @@ mod updater;
 #[cfg(feature = "handle_updates")]
 mod dispatcher;
 
+use std::process::ExitCode;
+
+use database::RedisClient;
 use teloxide::Bot;
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -24,11 +27,21 @@ pub enum Error {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     env_logger::init();
 
+    let Ok(redis_url) = std::env::var("REDIS_URL") else {
+        log::error!("Environment variable REDIS_URL not set!");
+        return ExitCode::FAILURE;
+    };
+
+    let Ok(redis_client) =
+        RedisClient::new(&redis_url).inspect_err(|e| log::error!("Invalid redis url: {e}"))
+    else {
+        return ExitCode::FAILURE;
+    };
+
     let bot = Bot::from_env();
-    let redis_client = database::RedisClient::new("redis://127.0.0.1/");
 
     let shutdown_dispatcher;
 
@@ -60,6 +73,8 @@ async fn main() {
     log::info!("Shutting down ...");
     let _ = shutdown_tx.send(());
     let _ = tokio::join!(shutdown_dispatcher(), updater_handle);
+
+    ExitCode::SUCCESS
 }
 
 // As soon as this fails, the error handling in `send_message` must be adapted

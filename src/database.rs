@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use redis::AsyncCommands;
+use redis::{AsyncCommands, RedisResult};
 use teloxide::types::ChatId;
 
 use crate::updater::SavedState;
@@ -14,9 +14,9 @@ pub struct RedisClient {
 }
 
 impl RedisClient {
-    pub fn new(redis_url: &str) -> Self {
-        let client = redis::Client::open(redis_url).unwrap();
-        RedisClient { client }
+    pub fn new(redis_url: &str) -> RedisResult<Self> {
+        let client = redis::Client::open(redis_url)?;
+        Ok(RedisClient { client })
     }
 
     pub async fn register_user(&self, chat_id: ChatId) -> redis::RedisResult<bool> {
