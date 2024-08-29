@@ -201,6 +201,8 @@ async fn send_message(
                 }
                 _ => return UpdateChatId::Keep,
             }
+        } else {
+            break;
         }
     }
 
