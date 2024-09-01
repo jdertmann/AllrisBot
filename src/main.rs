@@ -7,7 +7,7 @@ mod dispatcher;
 use std::process::ExitCode;
 
 use database::RedisClient;
-use teloxide::Bot;
+use teloxide::adaptors::Throttle;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -25,6 +25,8 @@ pub enum Error {
     UrlParseError(#[from] url::ParseError),
 }
 
+type Bot = Throttle<teloxide::Bot>;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     env_logger::init();
@@ -40,7 +42,8 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let bot = Bot::from_env();
+    let (bot, worker) = Throttle::new(teloxide::Bot::from_env(), Default::default());
+    let throttle_handle = tokio::spawn(worker);
 
     let shutdown_dispatcher;
 
@@ -71,7 +74,7 @@ async fn main() -> ExitCode {
 
     log::info!("Shutting down ...");
     let _ = shutdown_tx.send(());
-    let _ = tokio::join!(shutdown_dispatcher(), updater_handle);
+    let _ = tokio::join!(shutdown_dispatcher(), updater_handle, throttle_handle);
 
     ExitCode::SUCCESS
 }

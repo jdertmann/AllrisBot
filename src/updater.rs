@@ -12,7 +12,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
 use crate::database::RedisClient;
-use crate::{Error, FEED_URL};
+use crate::{Bot, Error, FEED_URL};
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -111,6 +111,7 @@ async fn scrape_website(client: &Client, url: &str) -> Result<WebsiteData, Error
         sammeldokument,
     })
 }
+
 async fn generate_notification(
     client: &Client,
     item: &Item,

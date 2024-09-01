@@ -2,6 +2,7 @@ use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
 use crate::database::RedisClient;
+use crate::Bot;
 
 #[derive(BotCommands, Clone, Debug)]
 #[command(

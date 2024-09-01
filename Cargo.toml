@@ -17,7 +17,7 @@ reqwest = "0.12"
 scraper = { version = "0.20", default-features = false }
 serde = "1"
 serde-xml-rs = "0.6"
-teloxide = { version = "0.13", features = ["macros"] }
+teloxide = { version = "0.13", features = ["macros", "throttle"] }
 thiserror="1"
 tokio = { version = "1.39", features = ["rt", "macros", "rt-multi-thread", "sync"] }
 url = "2.5"
