@@ -180,7 +180,12 @@ async fn send_message(
     msg: &str,
     buttons: &[InlineKeyboardButton],
 ) -> UpdateChatId {
-    const MAX_TRIES: usize = 3;
+    const MAX_TRIES: usize = 5;
+    const BASE_DELAY: Duration = Duration::from_millis(500);
+    const MULTIPLIER: u32 = 3;
+
+    let mut delay = BASE_DELAY;
+
     let mut update = UpdateChatId::Keep;
     for _ in 0..MAX_TRIES {
         let mut request = bot.send_message(chat, msg).parse_mode(ParseMode::Html);
@@ -207,7 +212,7 @@ async fn send_message(
                         return UpdateChatId::Remove
                     }
                     _ => {
-                        // Invalid message
+                        // Invalid message probably
                         return UpdateChatId::Keep;
                     }
                 },
@@ -218,11 +223,16 @@ async fn send_message(
                 RetryAfter(secs) => {
                     tokio::time::sleep(secs.duration()).await;
                 }
-                _ => return UpdateChatId::Keep,
+                _ => {
+                    tokio::time::sleep(delay).await;
+                    delay *= MULTIPLIER;
+                }
             }
         } else {
             break;
         }
+
+        log::info!("Retrying ...")
     }
 
     update
