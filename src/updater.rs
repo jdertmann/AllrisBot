@@ -64,7 +64,6 @@ fn extract_text(element: ElementRef) -> String {
 
 #[derive(Default)]
 struct WebsiteData {
-    url: Option<Url>,
     art: Option<String>,
     verfasser: Option<String>,
     amt: Option<String>,
@@ -72,11 +71,7 @@ struct WebsiteData {
     sammeldokument: Option<Url>,
 }
 
-async fn scrape_website(client: &Client, url: &str) -> Result<WebsiteData, Error> {
-    log::info!("Scraping website at {url}");
-
-    let url = Url::parse(url)?;
-
+async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
     let html = client
         .get(url.clone())
         .send()
@@ -100,7 +95,6 @@ async fn scrape_website(client: &Client, url: &str) -> Result<WebsiteData, Error
         .and_then(|s| url.join(s).ok());
 
     Ok(WebsiteData {
-        url: Some(url),
         art: document.select(&VOART_SELECTOR).next().map(extract_text),
         verfasser: document
             .select(&VOVERFASSER_SELECTOR)
@@ -112,6 +106,18 @@ async fn scrape_website(client: &Client, url: &str) -> Result<WebsiteData, Error
     })
 }
 
+async fn scrape_website(client: &Client, url: &str) -> (Option<Url>, Result<WebsiteData, Error>) {
+    log::info!("Scraping website at {url}");
+    let url = match Url::parse(url) {
+        Ok(url) => url,
+        Err(e) => {
+            return (None, Err(e.into()));
+        }
+    };
+    let data = scrape_website_inner(client, &url).await;
+    (Some(url), data)
+}
+
 async fn generate_notification(
     client: &Client,
     item: &Item,
@@ -119,15 +125,15 @@ async fn generate_notification(
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
 
+    let (url, data) = scrape_website(client, &item.link).await;
+
     let WebsiteData {
-        url,
         art,
         verfasser,
         amt,
         gremien,
         sammeldokument,
-    } = scrape_website(client, &item.link)
-        .await
+    } = data
         .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
         .unwrap_or_default();
 
