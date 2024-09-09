@@ -25,7 +25,7 @@ impl RedisClient {
             log::info!("Migrating db ...");
             let chats: Vec<i64> = self.client.smembers("allrisbot:registered_users").await?;
             for m in chats {
-                self.client.hset_nx(&REGISTERED_CHATS_KEY, m, "").await?;
+                self.client.hset_nx(REGISTERED_CHATS_KEY, m, "").await?;
             }
             self.client.del("allrisbot:registered_users").await?;
             log::info!("Migration successful!");
@@ -36,6 +36,7 @@ impl RedisClient {
         Ok(())
     }
 
+    #[cfg(feature = "handle_updates")]
     pub async fn register_chat(
         &mut self,
         chat_id: ChatId,
@@ -67,7 +68,7 @@ impl RedisClient {
         redis::cmd("EVAL")
             .arg(SCRIPT)
             .arg(1)
-            .arg(&REGISTERED_CHATS_KEY)
+            .arg(REGISTERED_CHATS_KEY)
             .arg(old_chat_id.0)
             .arg(new_chat_id.0)
             .exec_async(&mut self.client)
