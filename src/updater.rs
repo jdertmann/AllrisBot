@@ -12,7 +12,13 @@ use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
 use crate::database::RedisClient;
-use crate::{Bot, Error, FEED_URL};
+use crate::{Bot, Error};
+
+const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
+const ADDITIONAL_ERRORS: &[&str] = &[
+    "Forbidden: bot was kicked from the channel chat",
+    "Bad Request: not enough rights to send text messages to the chat",
+];
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -214,12 +220,12 @@ async fn send_message(
                     | UserDeactivated
                     | CantInitiateConversation
                     | CantTalkWithBots => return UpdateChatId::Remove,
-                    Unknown(e) if &e == "Forbidden: bot was kicked from the channel chat" => {
+                    Unknown(e) if ADDITIONAL_ERRORS.contains(&e.as_str()) => {
                         return UpdateChatId::Remove
                     }
                     _ => {
                         // Invalid message probably
-                        return UpdateChatId::Keep;
+                        return update;
                     }
                 },
                 MigrateToChatId(c) => {
@@ -301,5 +307,16 @@ pub async fn feed_updater(bot: Bot, redis: RedisClient, mut shutdown: oneshot::R
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
+    }
+}
+
+// As soon as this fails, the error handling in `send_message` must be adapted
+#[test]
+fn test_api_error_not_yet_added() {
+    use teloxide::ApiError;
+
+    for msg in ADDITIONAL_ERRORS {
+        let api_error: ApiError = serde_json::from_str(&format!("\"{msg}\"")).unwrap();
+        assert_eq!(api_error, ApiError::Unknown(msg.to_string()));
     }
 }

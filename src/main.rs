@@ -11,8 +11,6 @@ use teloxide::adaptors::Throttle;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
-
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("web request error: {0}")]
@@ -77,15 +75,4 @@ async fn main() -> ExitCode {
     let _ = tokio::join!(shutdown_dispatcher(), updater_handle, throttle_handle);
 
     ExitCode::SUCCESS
-}
-
-// As soon as this fails, the error handling in `send_message` must be adapted
-#[test]
-#[cfg(feature = "handle_updates")]
-fn test_api_error_not_yet_added() {
-    use teloxide::ApiError;
-
-    const ERROR_MSG: &str = "Forbidden: bot was kicked from the channel chat";
-    let api_error: ApiError = serde_json::from_str(&format!("\"{ERROR_MSG}\"")).unwrap();
-    assert_eq!(api_error, ApiError::Unknown(ERROR_MSG.to_string()));
 }
