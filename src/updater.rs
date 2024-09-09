@@ -262,7 +262,7 @@ async fn send_message(
     update
 }
 
-async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
+async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
     let channel = fetch_feed(FEED_URL).await?;
     let client = reqwest::Client::new();
 
@@ -304,7 +304,7 @@ async fn do_update(bot: &Bot, redis: &RedisClient) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn feed_updater(bot: Bot, redis: RedisClient, mut shutdown: oneshot::Receiver<()>) {
+pub async fn feed_updater(bot: Bot, mut redis: RedisClient, mut shutdown: oneshot::Receiver<()>) {
     let mut interval = interval(Duration::from_secs(300));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
@@ -315,7 +315,7 @@ pub async fn feed_updater(bot: Bot, redis: RedisClient, mut shutdown: oneshot::R
         };
 
         log::info!("Updating ...");
-        match do_update(&bot, &redis).await {
+        match do_update(&bot, &mut redis).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }

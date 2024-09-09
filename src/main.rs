@@ -21,8 +21,9 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let Ok(redis_client) =
-        RedisClient::new(&redis_url).inspect_err(|e| log::error!("Invalid redis url: {e}"))
+    let Ok(redis_client) = RedisClient::new(&redis_url)
+        .await
+        .inspect_err(|e| log::error!("Redis connection failed: {e}"))
     else {
         return ExitCode::FAILURE;
     };

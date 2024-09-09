@@ -22,7 +22,7 @@ async fn handle_message(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    redis_client: RedisClient,
+    mut redis_client: RedisClient,
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start => {
@@ -73,7 +73,7 @@ fn is_channel_perm_update(update: ChatMemberUpdated) -> bool {
 
 async fn handle_perm_update(
     update: ChatMemberUpdated,
-    redis_client: RedisClient,
+    mut redis_client: RedisClient,
 ) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
         match redis_client.register_chat(update.chat.id).await {
