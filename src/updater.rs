@@ -140,7 +140,7 @@ async fn scrape_website(client: &Client, url: &str) -> (Option<Url>, Result<Webs
 async fn generate_notification(
     client: &Client,
     item: &Item,
-) -> Option<(String, Vec<InlineKeyboardButton>)> {
+) -> Option<(String, Vec<String>, Vec<InlineKeyboardButton>)> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
 
@@ -190,7 +190,7 @@ async fn generate_notification(
     let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 PDF", url));
     let buttons = [button1, button2].into_iter().flatten().collect();
 
-    Some((msg, buttons))
+    Some((msg, gremien, buttons))
 }
 
 enum UpdateChatId {
@@ -284,19 +284,22 @@ async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
             continue; // item already known (new version)
         }
 
-        let Some((msg, buttons)) = generate_notification(&client, item).await else {
+        let Some((msg, gremien, buttons)) = generate_notification(&client, item).await else {
             continue;
         };
 
-        for user in redis.get_chats().await? {
+        for (user, gremium) in redis.get_chats().await? {
+            if !(gremium.is_empty() || gremien.contains(&gremium)) {
+                continue;
+            }
+
             match send_message(bot, user, &msg, &buttons).await {
                 UpdateChatId::Keep => (),
                 UpdateChatId::Remove => {
                     let _ = redis.unregister_chat(user).await;
                 }
                 UpdateChatId::Migrate(c) => {
-                    let _ = redis.unregister_chat(user).await;
-                    let _ = redis.register_chat(c).await;
+                    let _ = redis.migrate_chat(user, c).await;
                 }
             }
         }

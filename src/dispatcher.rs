@@ -10,8 +10,11 @@ use crate::Bot;
     description = "Diese Befehle werden unterstützt:"
 )]
 enum Command {
-    #[command(description = "für Benachrichtigungen registrieren.")]
-    Start,
+    #[command(
+        description = "für Benachrichtigungen registrieren.",
+        parse_with = "default"
+    )]
+    Start(String),
     #[command(description = "Benachrichtigungen abbestellen.")]
     Stop,
     #[command(description = "zeige diesen Text.")]
@@ -25,16 +28,20 @@ async fn handle_message(
     mut redis_client: RedisClient,
 ) -> ResponseResult<()> {
     match cmd {
-        Command::Start => {
-            let reply = match redis_client.register_chat(msg.chat.id).await {
-                Ok(true) => {
-                    log::info!("Chat {} registered", msg.chat.id);
-                    "Du hast dich erfolgreich für Benachrichtigungen registriert."
-                }
-                Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
-                Err(e) => {
-                    log::error!("Database error: {e}");
-                    "Ein interner Fehler ist aufgetreten :(("
+        Command::Start(gremium) => {
+            let reply = if gremium.len() >= 256 {
+                "Name des Gremiums zu lang!"
+            } else {
+                match redis_client.register_chat(msg.chat.id, &gremium).await {
+                    Ok(true) => {
+                        log::info!("Chat {} registered: {gremium}", msg.chat.id);
+                        "Du hast dich erfolgreich für Benachrichtigungen registriert."
+                    }
+                    Ok(false) => "Du bist bereits für Benachrichtigungen registriert.",
+                    Err(e) => {
+                        log::error!("Database error: {e}");
+                        "Ein interner Fehler ist aufgetreten :(("
+                    }
                 }
             };
 
@@ -76,7 +83,7 @@ async fn handle_perm_update(
     mut redis_client: RedisClient,
 ) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
-        match redis_client.register_chat(update.chat.id).await {
+        match redis_client.register_chat(update.chat.id, "").await {
             Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Adding channel \"{}\" failed: {e}",
