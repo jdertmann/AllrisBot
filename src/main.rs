@@ -21,15 +21,12 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let Ok(mut redis_client) = RedisClient::new(&redis_url)
+    let Ok(redis_client) = RedisClient::new(&redis_url)
         .await
         .inspect_err(|e| log::error!("Redis connection failed: {e}"))
     else {
         return ExitCode::FAILURE;
     };
-
-    // remove again once deployed
-    let _ = redis_client.migrate_db().await;
 
     let (bot, worker) = Throttle::new(teloxide::Bot::from_env(), Default::default());
     let throttle_handle = tokio::spawn(worker);
