@@ -20,6 +20,22 @@ impl RedisClient {
         })
     }
 
+    pub async fn migrate_db(&mut self) -> RedisResult<()> {
+        if self.client.exists("allrisbot:registered_users").await? {
+            log::info!("Migrating db ...");
+            let chats: Vec<i64> = self.client.smembers("allrisbot:registered_users").await?;
+            for m in chats {
+                self.client.hset_nx(&REGISTERED_CHATS_KEY, m, "").await?;
+            }
+            self.client.del("allrisbot:registered_users").await?;
+            log::info!("Migration successful!");
+        } else {
+            log::info!("Database up to date!");
+        }
+
+        Ok(())
+    }
+
     pub async fn register_chat(
         &mut self,
         chat_id: ChatId,
