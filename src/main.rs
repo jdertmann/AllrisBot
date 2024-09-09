@@ -8,20 +8,7 @@ use std::process::ExitCode;
 
 use database::RedisClient;
 use teloxide::adaptors::Throttle;
-use thiserror::Error;
 use tokio::sync::oneshot;
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("web request error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("invalid feed format: {0}")]
-    ParseError(#[from] serde_xml_rs::Error),
-    #[error("redis error: {0}")]
-    RedisError(#[from] redis::RedisError),
-    #[error("parsing url failed: {0}")]
-    UrlParseError(#[from] url::ParseError),
-}
 
 type Bot = Throttle<teloxide::Bot>;
 

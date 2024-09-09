@@ -7,12 +7,13 @@ use serde::Deserialize;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use teloxide::utils::html;
+use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
 use crate::database::RedisClient;
-use crate::{Bot, Error};
+use crate::Bot;
 
 const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
 const ADDITIONAL_ERRORS: &[&str] = &[
@@ -34,26 +35,37 @@ lazy_static! {
     static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
 }
 
+#[derive(Debug, Error)]
+enum Error {
+    #[error("web request error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("invalid feed format: {0}")]
+    ParseXML(#[from] serde_xml_rs::Error),
+    #[error("redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+    #[error("parsing url failed: {0}")]
+    ParseUrl(#[from] url::ParseError),
+}
+
 #[derive(Deserialize, Debug)]
 struct Rss {
     channel: Channel,
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Channel {
+struct Channel {
     #[serde(default)]
-    pub item: Vec<Item>,
+    item: Vec<Item>,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct Item {
-    pub title: String,
-    pub link: String,
-    pub description: String,
+struct Item {
+    title: String,
+    link: String,
+    description: String,
 }
 
-pub async fn fetch_feed(url: &str) -> Result<Channel, crate::Error> {
+async fn fetch_feed(url: &str) -> Result<Channel, Error> {
     let response = reqwest::get(url).await?.text().await?;
     let rss: Rss = serde_xml_rs::from_str(&response)?;
     Ok(rss.channel)
