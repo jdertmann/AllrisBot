@@ -18,6 +18,7 @@ use crate::Bot;
 const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
 const ADDITIONAL_ERRORS: &[&str] = &[
     "Forbidden: bot was kicked from the channel chat",
+    "Forbidden: bot was kicked from the group chat",
     "Bad Request: not enough rights to send text messages to the chat",
 ];
 
