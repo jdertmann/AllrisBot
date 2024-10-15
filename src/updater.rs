@@ -309,7 +309,7 @@ async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
 }
 
 pub async fn feed_updater(bot: Bot, mut redis: RedisClient, mut shutdown: oneshot::Receiver<()>) {
-    let mut interval = interval(Duration::from_secs(300));
+    let mut interval = interval(Duration::from_secs(900));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
     loop {
