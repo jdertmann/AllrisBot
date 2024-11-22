@@ -34,6 +34,7 @@ lazy_static! {
     static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
     static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
     static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
+    static ref TO_LINK_SELECTOR: Selector = Selector::parse("#bfTable .toLink a").unwrap();
 }
 
 #[derive(Debug, Error)]
@@ -88,6 +89,7 @@ struct WebsiteData {
     amt: Option<String>,
     gremien: Vec<String>,
     sammeldokument: Option<Url>,
+    has_to_link: bool
 }
 
 async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
@@ -113,6 +115,8 @@ async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData,
         .and_then(|el| el.attr("href"))
         .and_then(|s| url.join(s).ok());
 
+    let has_to_link = document.select(&TO_LINK_SELECTOR).next().is_some();
+
     Ok(WebsiteData {
         art: document.select(&VOART_SELECTOR).next().map(extract_text),
         verfasser: document
@@ -122,6 +126,7 @@ async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData,
         amt: document.select(&VOFAMT_SELECTOR).next().map(extract_text),
         gremien,
         sammeldokument,
+        has_to_link
     })
 }
 
@@ -152,9 +157,16 @@ async fn generate_notification(
         amt,
         gremien,
         sammeldokument,
+        has_to_link
     } = data
         .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
         .unwrap_or_default();
+
+    if has_to_link {
+        // was already discussed, probably old Vorlage, skipping
+        log::info!("Skipping {dsnr:?} ({title}): was already discussed");
+        return None;
+    }
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
         (Some("Anregungen und Beschwerden" | "Einwohnerfrage" | "Informationsbrief"), _, _) => {
@@ -284,7 +296,7 @@ async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
 
         // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
         if !redis.add_item(volfdnr).await? {
-            continue; // item already known (new version)
+            continue; // item already known
         }
 
         let Some((msg, gremien, buttons)) = generate_notification(&client, item).await else {
