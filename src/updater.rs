@@ -157,7 +157,10 @@ async fn generate_notification(
         .unwrap_or_default();
 
     let verfasser = match (art.as_deref(), &verfasser, &amt) {
-        (Some("Anregungen und Beschwerden" | "Informationsbrief"), _, _) => None,
+        (Some("Anregungen und Beschwerden" | "Einwohnerfrage" | "Informationsbrief"), _, _) => {
+            // author is meaningless here, it's always the same Amt.
+            None
+        }
         (Some("Stellungnahme der Verwaltung"), _, Some(amt)) => Some(amt),
         (_, Some(verfasser), _) => Some(verfasser),
         (_, None, Some(amt)) => Some(amt),
