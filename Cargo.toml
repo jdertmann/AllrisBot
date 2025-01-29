@@ -7,10 +7,10 @@ edition = "2021"
 env_logger = "0.11"
 lazy_static = "1.5"
 log = "0.4"
-redis = { version = "0.27", default-features = false, features = ["keep-alive", "tokio-comp", "connection-manager"] }
+redis = { version = "0.28", default-features = false, features = ["keep-alive", "tokio-comp", "connection-manager"] }
 regex = "1"
 reqwest = "0.12"
-scraper = { version = "0.20", default-features = false }
+scraper = { version = "0.22", default-features = false }
 serde = "1"
 serde-xml-rs = "0.6"
 teloxide = { version = "0.13", features = ["macros", "throttle"] }
