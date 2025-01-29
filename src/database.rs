@@ -20,7 +20,6 @@ impl RedisClient {
         })
     }
 
-    #[cfg(feature = "handle_updates")]
     pub async fn register_chat(
         &mut self,
         chat_id: ChatId,

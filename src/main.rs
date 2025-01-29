@@ -1,8 +1,6 @@
 mod database;
-mod updater;
-
-#[cfg(feature = "handle_updates")]
 mod dispatcher;
+mod updater;
 
 use std::process::ExitCode;
 
@@ -31,24 +29,20 @@ async fn main() -> ExitCode {
     let (bot, worker) = Throttle::new(teloxide::Bot::from_env(), Default::default());
     let throttle_handle = tokio::spawn(worker);
 
-    let shutdown_dispatcher;
+    let shutdown_token = if false {
+        None
+    } else {
+        let dispatcher = dispatcher::create(bot.clone(), redis_client.clone());
+        Some(dispatcher.shutdown_token())
+    };
 
-    #[cfg(feature = "handle_updates")]
-    {
-        let mut dispatcher = dispatcher::create(bot.clone(), redis_client.clone());
-        let shutdown_token = dispatcher.shutdown_token();
-        tokio::spawn(async move { dispatcher.dispatch().await });
-        shutdown_dispatcher = || async move {
-            if let Ok(f) = shutdown_token.shutdown() {
+    let shutdown_dispatcher = || async move {
+        if let Some(t) = shutdown_token {
+            if let Ok(f) = t.shutdown() {
                 f.await
             }
-        };
-    }
-
-    #[cfg(not(feature = "handle_updates"))]
-    {
-        shutdown_dispatcher = || std::future::ready(());
-    }
+        }
+    };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let updater_handle = tokio::spawn(updater::feed_updater(bot, redis_client, shutdown_rx));

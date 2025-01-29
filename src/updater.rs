@@ -89,7 +89,7 @@ struct WebsiteData {
     amt: Option<String>,
     gremien: Vec<String>,
     sammeldokument: Option<Url>,
-    has_to_link: bool
+    has_to_link: bool,
 }
 
 async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
@@ -126,7 +126,7 @@ async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData,
         amt: document.select(&VOFAMT_SELECTOR).next().map(extract_text),
         gremien,
         sammeldokument,
-        has_to_link
+        has_to_link,
     })
 }
 
@@ -157,7 +157,7 @@ async fn generate_notification(
         amt,
         gremien,
         sammeldokument,
-        has_to_link
+        has_to_link,
     } = data
         .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
         .unwrap_or_default();
