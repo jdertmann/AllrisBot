@@ -13,8 +13,6 @@ use url::Url;
 
 use crate::database::{self, Message, RedisClient};
 
-const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
-
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
         .dot_matches_new_line(true)
@@ -60,7 +58,7 @@ struct Item {
     description: String,
 }
 
-async fn fetch_feed(url: &str) -> Result<Channel, Error> {
+async fn fetch_feed(url: Url) -> Result<Channel, Error> {
     let response = reqwest::get(url).await?.text().await?;
     let rss: Rss = serde_xml_rs::from_str(&response)?;
     Ok(rss.channel)
@@ -205,17 +203,19 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
     ))
 }
 
-async fn do_update(db: &mut RedisClient) -> Result<(), Error> {
-    let feed_content = fetch_feed(FEED_URL).await?;
+async fn do_update(feed_url: Url, db: &mut RedisClient) -> Result<(), Error> {
+    let feed_content = fetch_feed(feed_url).await?;
     let http_client = reqwest::Client::new();
 
     let chats = db.get_chats().await?;
 
     for item in &feed_content.item {
-        let Some(volfdnr) = item
-            .link
-            .strip_prefix("https://www.bonn.sitzung-online.de/vo020?VOLFDNR=")
-        else {
+        let link = Url::parse(&item.link).ok();
+        let Some(volfdnr) = link.as_ref().and_then(|link| {
+            link.query_pairs()
+                .find(|(q, _)| q == "VOLFDNR")
+                .map(|(_, v)| v)
+        }) else {
             log::warn!(
                 "Link deviates from the usual pattern, skipping: {}",
                 item.link
@@ -224,7 +224,7 @@ async fn do_update(db: &mut RedisClient) -> Result<(), Error> {
         };
 
         // if this fails, it is ok to abort the whole operation. If redis is down, we will just try again on a later invocation.
-        if db.has_item(volfdnr).await? {
+        if db.has_item(&volfdnr).await? {
             continue; // item already known
         }
 
@@ -237,17 +237,40 @@ async fn do_update(db: &mut RedisClient) -> Result<(), Error> {
             .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(&gremium))
             .map(|(chat_id, _)| *chat_id);
 
-        db.queue_messages(volfdnr, &msg, chats).await?;
+        db.queue_messages(&volfdnr, &msg, chats).await?;
     }
 
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct AllrisUrl {
+    url: Url,
+}
+
+impl AllrisUrl {
+    pub fn parse(s: &str) -> Result<Self, url::ParseError> {
+        let mut url = Url::parse(s)?;
+        if !url.path().ends_with("/") {
+            url.set_path(&format!("{}/", url.path()));
+        }
+
+        Ok(Self { url })
+    }
+
+    fn feed_url(&self) -> Url {
+        self.url.join("rss/voreleased").unwrap()
+    }
+}
+
 pub async fn run_task(
+    allris_url: AllrisUrl,
     update_interval: Duration,
     mut db: RedisClient,
     mut shutdown: oneshot::Receiver<()>,
 ) {
+    let feed_url = allris_url.feed_url();
+
     let mut interval = interval(update_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
@@ -259,7 +282,7 @@ pub async fn run_task(
 
         log::info!("Updating ...");
 
-        match do_update(&mut db).await {
+        match do_update(feed_url.clone(), &mut db).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }

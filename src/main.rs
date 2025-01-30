@@ -11,6 +11,8 @@ use database::RedisClient;
 use teloxide::dispatching::ShutdownToken;
 use tokio::sync::oneshot;
 
+use crate::allris_scraper::AllrisUrl;
+
 type Bot = teloxide::Bot;
 
 /// Telegram bot that notifies about newly published documents in the Allris 4 council information system.
@@ -28,6 +30,10 @@ struct Args {
     /// Ignore incoming messages
     #[arg(short, long)]
     ignore_messages: bool,
+
+    /// URL of the Allris 4 instance
+    #[arg(short, long, value_parser = AllrisUrl::parse, default_value = "https://www.bonn.sitzung-online.de/")]
+    allris_url: AllrisUrl,
 
     /// Update interval in seconds
     #[arg(short, long, default_value_t = 900)]
@@ -72,6 +78,7 @@ impl Dispatcher {
 
         Self { token }
     }
+
     async fn shutdown(self) {
         if let Some(t) = self.token {
             if let Ok(f) = t.shutdown() {
@@ -90,6 +97,7 @@ impl Scraper {
     fn new(args: &Args, redis_client: RedisClient) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(allris_scraper::run_task(
+            args.allris_url.clone(),
             Duration::from_secs(args.update_interval),
             redis_client.clone(),
             shutdown_rx,
