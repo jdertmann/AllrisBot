@@ -17,11 +17,11 @@ type Bot = teloxide::Bot;
 #[command(version, about, long_about = None)]
 struct Args {
     /// URL of the Redis instance
-    #[arg(short, long, env = "REDIS_URL")]
+    #[arg(short, long, env = "REDIS_URL", default_value = "redis://127.0.0.1")]
     redis_url: String,
 
     /// Telegram bot token
-    #[arg(short = 't', long, env = "BOT_TOKEN")]
+    #[arg(short = 't', long = "token", env = "BOT_TOKEN")]
     bot_token: String,
 
     /// Ignore incoming messages

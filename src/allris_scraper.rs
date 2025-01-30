@@ -151,7 +151,8 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
         .unwrap_or_default();
 
     if has_to_link {
-        // was already discussed, probably old Vorlage, skipping
+        // was already discussed, probably old document, skipping
+        // TODO: Add this to known_items anyway
         log::info!("Skipping {dsnr:?} ({title}): was already discussed");
         return None;
     }
