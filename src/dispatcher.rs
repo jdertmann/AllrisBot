@@ -19,6 +19,11 @@ enum Command {
     Stop,
     #[command(description = "zeige diesen Text.")]
     Help,
+    #[command(
+        description = "sende eine Benachrichtigung für VOLFDNR",
+        parse_with = "default"
+    )]
+    AddManual(u64),
 }
 
 async fn handle_message(
@@ -65,6 +70,17 @@ async fn handle_message(
         Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
                 .await?;
+        }
+        Command::AddManual(volfdnr) => {
+            if msg.chat.id.0 == 6037365634 {
+                let _ = crate::updater::handle_volfdnr(
+                    &bot,
+                    &reqwest::Client::new(),
+                    &mut redis_client,
+                    &volfdnr.to_string(),
+                )
+                .await;
+            }
         }
     }
     Ok(())

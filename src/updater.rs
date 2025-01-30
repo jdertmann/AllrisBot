@@ -30,6 +30,8 @@ lazy_static! {
     static ref GREMIEN_SELECTOR: Selector =
         Selector::parse("#bfTable > table > tbody > tr > td:not(.date) + td:nth-of-type(3)")
             .unwrap();
+    static ref VOBETREFF_SELECTOR: Selector = Selector::parse("#vobetreff").unwrap();
+    static ref TITLE_SELECTOR: Selector = Selector::parse(".header h1.title").unwrap();
     static ref VOART_SELECTOR: Selector = Selector::parse("#voart").unwrap();
     static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
     static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
@@ -84,12 +86,14 @@ fn extract_text(element: ElementRef) -> String {
 
 #[derive(Default)]
 struct WebsiteData {
+    betreff: Option<String>,
+    dsnr: Option<String>,
     art: Option<String>,
     verfasser: Option<String>,
     amt: Option<String>,
     gremien: Vec<String>,
     sammeldokument: Option<Url>,
-    has_to_link: bool
+    has_to_link: bool,
 }
 
 async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
@@ -117,7 +121,19 @@ async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData,
 
     let has_to_link = document.select(&TO_LINK_SELECTOR).next().is_some();
 
+    let betreff = document
+        .select(&VOBETREFF_SELECTOR)
+        .next()
+        .map(extract_text);
+    let dsnr = document
+        .select(&TITLE_SELECTOR)
+        .next()
+        .map(extract_text)
+        .map(|x| x.split(" - ").next().unwrap().to_owned());
+
     Ok(WebsiteData {
+        betreff,
+        dsnr,
         art: document.select(&VOART_SELECTOR).next().map(extract_text),
         verfasser: document
             .select(&VOVERFASSER_SELECTOR)
@@ -126,7 +142,7 @@ async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData,
         amt: document.select(&VOFAMT_SELECTOR).next().map(extract_text),
         gremien,
         sammeldokument,
-        has_to_link
+        has_to_link,
     })
 }
 
@@ -157,7 +173,8 @@ async fn generate_notification(
         amt,
         gremien,
         sammeldokument,
-        has_to_link
+        has_to_link,
+        ..
     } = data
         .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
         .unwrap_or_default();
@@ -199,6 +216,76 @@ async fn generate_notification(
     if let Some(dsnr) = dsnr {
         msg += "\n📎 Ds.-Nr. ";
         msg += &html::escape(dsnr);
+    }
+
+    let button1 = url.map(|url| InlineKeyboardButton::url("🌐 Allris", url));
+    let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 PDF", url));
+    let buttons = [button1, button2].into_iter().flatten().collect();
+
+    Some((msg, gremien, buttons))
+}
+
+async fn generate_notification_2(
+    client: &Client,
+    volfdnr: &str,
+) -> Option<(String, Vec<String>, Vec<InlineKeyboardButton>)> {
+    let url = format!("https://www.bonn.sitzung-online.de/vo020?VOLFDNR={volfdnr}");
+
+    let (url, data) = scrape_website(client, &url).await;
+
+    let WebsiteData {
+        art,
+        verfasser,
+        amt,
+        gremien,
+        sammeldokument,
+        has_to_link,
+        dsnr,
+        betreff: Some(title),
+    } = data
+        .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
+        .unwrap_or_default()
+    else {
+        return None;
+    };
+
+    if has_to_link {
+        // was already discussed, probably old Vorlage, skipping
+        log::info!("Skipping {dsnr:?} ({title}): was already discussed");
+        return None;
+    }
+
+    let verfasser = match (art.as_deref(), &verfasser, &amt) {
+        (Some("Anregungen und Beschwerden" | "Einwohnerfrage" | "Informationsbrief"), _, _) => {
+            // author is meaningless here, it's always the same Amt.
+            None
+        }
+        (Some("Stellungnahme der Verwaltung"), _, Some(amt)) => Some(amt),
+        (_, Some(verfasser), _) => Some(verfasser),
+        (_, None, Some(amt)) => Some(amt),
+        _ => None,
+    };
+
+    let mut msg = html::bold(&title) + "\n";
+
+    if let Some(art) = art {
+        msg += "\n📌 ";
+        msg += &html::escape(&art);
+    }
+
+    if let Some(verfasser) = verfasser {
+        msg += "\n👤 ";
+        msg += &html::escape(verfasser);
+    }
+
+    if !gremien.is_empty() {
+        msg += "\n🏛️ ";
+        msg += &html::escape(&gremien.join(" | "));
+    }
+
+    if let Some(dsnr) = dsnr {
+        msg += "\n📎 Ds.-Nr. ";
+        msg += &html::escape(&dsnr);
     }
 
     let button1 = url.map(|url| InlineKeyboardButton::url("🌐 Allris", url));
@@ -276,6 +363,33 @@ async fn send_message(
     }
 
     update
+}
+
+pub async fn handle_volfdnr(bot: &Bot, client: &Client, redis: &mut RedisClient, volfdnr: &str) {
+    // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
+    if !redis.add_item(volfdnr).await.unwrap_or(false) {
+        return; // item already known
+    }
+
+    let Some((msg, gremien, buttons)) = generate_notification_2(&client, volfdnr).await else {
+        return;
+    };
+
+    for (user, gremium) in redis.get_chats().await.unwrap_or_default() {
+        if !(gremium.is_empty() || gremien.contains(&gremium)) {
+            continue;
+        }
+
+        match send_message(bot, user, &msg, &buttons).await {
+            UpdateChatId::Keep => (),
+            UpdateChatId::Remove => {
+                let _ = redis.unregister_chat(user).await;
+            }
+            UpdateChatId::Migrate(c) => {
+                let _ = redis.migrate_chat(user, c).await;
+            }
+        }
+    }
 }
 
 async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
