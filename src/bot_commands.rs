@@ -107,8 +107,9 @@ pub fn create(
     bot: Bot,
     redis_client: RedisClient,
 ) -> Dispatcher<Bot, teloxide::RequestError, teloxide::dispatching::DefaultKey> {
+    log::info!("Hallo");
     let handler = dptree::entry()
-        .inspect(|u: Update| log::debug!("{u:#?}"))
+        .inspect(|u: Update| log::info!("{u:#?}"))
         .branch(
             Update::filter_message()
                 .filter_command::<Command>()

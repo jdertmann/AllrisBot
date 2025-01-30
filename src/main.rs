@@ -1,14 +1,15 @@
+mod allris_scraper;
+mod bot_commands;
 mod database;
-mod dispatcher;
-mod updater;
+mod message_queue;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use database::RedisClient;
-use teloxide::adaptors::Throttle;
 use tokio::sync::oneshot;
 
-type Bot = Throttle<teloxide::Bot>;
+type Bot = teloxide::Bot;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -26,14 +27,15 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let (bot, worker) = Throttle::new(teloxide::Bot::from_env(), Default::default());
-    let throttle_handle = tokio::spawn(worker);
+    let bot = teloxide::Bot::from_env();
 
     let shutdown_token = if false {
         None
     } else {
-        let dispatcher = dispatcher::create(bot.clone(), redis_client.clone());
-        Some(dispatcher.shutdown_token())
+        let mut dispatcher = bot_commands::create(bot.clone(), redis_client.clone());
+        let token = dispatcher.shutdown_token();
+        tokio::spawn(async move { dispatcher.dispatch().await });
+        Some(token)
     };
 
     let shutdown_dispatcher = || async move {
@@ -45,7 +47,13 @@ async fn main() -> ExitCode {
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let updater_handle = tokio::spawn(updater::feed_updater(bot, redis_client, shutdown_rx));
+    let scraper_task_handle = tokio::spawn(allris_scraper::run_task(
+        Duration::from_secs(900),
+        redis_client.clone(),
+        shutdown_rx,
+    ));
+
+    let _ = tokio::spawn(message_queue::task(bot.clone(), redis_client));
 
     match tokio::signal::ctrl_c().await {
         Ok(_) => (),
@@ -54,7 +62,7 @@ async fn main() -> ExitCode {
 
     log::info!("Shutting down ...");
     let _ = shutdown_tx.send(());
-    let _ = tokio::join!(shutdown_dispatcher(), updater_handle, throttle_handle);
+    let _ = tokio::join!(shutdown_dispatcher(), scraper_task_handle);
 
     ExitCode::SUCCESS
 }

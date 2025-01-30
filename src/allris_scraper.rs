@@ -4,23 +4,16 @@ use lazy_static::lazy_static;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
-use teloxide::prelude::*;
-use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
+use teloxide::types::InlineKeyboardButton;
 use teloxide::utils::html;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
-use crate::database::RedisClient;
-use crate::Bot;
+use crate::database::{self, Message, RedisClient};
 
 const FEED_URL: &str = "https://www.bonn.sitzung-online.de/rss/voreleased";
-const ADDITIONAL_ERRORS: &[&str] = &[
-    "Forbidden: bot was kicked from the channel chat",
-    "Forbidden: bot was kicked from the group chat",
-    "Bad Request: not enough rights to send text messages to the chat",
-];
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -43,8 +36,8 @@ enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("invalid feed format: {0}")]
     ParseXML(#[from] serde_xml_rs::Error),
-    #[error("redis error: {0}")]
-    Redis(#[from] redis::RedisError),
+    #[error("db error: {0}")]
+    DbError(#[from] database::DatabaseError),
     #[error("parsing url failed: {0}")]
     ParseUrl(#[from] url::ParseError),
 }
@@ -69,6 +62,7 @@ struct Item {
 
 async fn fetch_feed(url: &str) -> Result<Channel, Error> {
     let response = reqwest::get(url).await?.text().await?;
+    log::info!("Here");
     let rss: Rss = serde_xml_rs::from_str(&response)?;
     Ok(rss.channel)
 }
@@ -142,10 +136,7 @@ async fn scrape_website(client: &Client, url: &str) -> (Option<Url>, Result<Webs
     (Some(url), data)
 }
 
-async fn generate_notification(
-    client: &Client,
-    item: &Item,
-) -> Option<(String, Vec<String>, Vec<InlineKeyboardButton>)> {
+async fn generate_notification(client: &Client, item: &Item) -> Option<(Message, Vec<String>)> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
 
@@ -205,84 +196,27 @@ async fn generate_notification(
     let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 PDF", url));
     let buttons = [button1, button2].into_iter().flatten().collect();
 
-    Some((msg, gremien, buttons))
+    Some((
+        Message {
+            text: msg,
+            parse_mode: teloxide::types::ParseMode::Html,
+            buttons,
+        },
+        gremien,
+    ))
 }
 
-enum UpdateChatId {
-    Keep,
-    Remove,
-    Migrate(ChatId),
-}
+async fn do_update(db: &mut RedisClient) -> Result<(), Error> {
+    log::info!("Here");
 
-async fn send_message(
-    bot: &Bot,
-    mut chat: ChatId,
-    msg: &str,
-    buttons: &[InlineKeyboardButton],
-) -> UpdateChatId {
-    const MAX_TRIES: usize = 5;
-    const BASE_DELAY: Duration = Duration::from_millis(500);
-    const MULTIPLIER: u32 = 3;
+    let feed_content = fetch_feed(FEED_URL).await?;
+    let http_client = reqwest::Client::new();
+    log::info!("Here!");
 
-    let mut delay = BASE_DELAY;
+    let chats = db.get_chats().await?;
+    log::info!("Here?");
 
-    let mut update = UpdateChatId::Keep;
-    for _ in 0..MAX_TRIES {
-        let mut request = bot.send_message(chat, msg).parse_mode(ParseMode::Html);
-
-        if !buttons.is_empty() {
-            request = request.reply_markup(InlineKeyboardMarkup::new(vec![buttons.to_owned()]));
-        }
-
-        if let Err(e) = request.await {
-            log::warn!("Sending notification failed: {e}");
-            use teloxide::ApiError::*;
-            use teloxide::RequestError::*;
-            match e {
-                Api(e) => match e {
-                    BotBlocked
-                    | ChatNotFound
-                    | GroupDeactivated
-                    | BotKicked
-                    | BotKickedFromSupergroup
-                    | UserDeactivated
-                    | CantInitiateConversation
-                    | CantTalkWithBots => return UpdateChatId::Remove,
-                    Unknown(e) if ADDITIONAL_ERRORS.contains(&e.as_str()) => {
-                        return UpdateChatId::Remove
-                    }
-                    _ => {
-                        // Invalid message probably
-                        return update;
-                    }
-                },
-                MigrateToChatId(c) => {
-                    chat = c;
-                    update = UpdateChatId::Migrate(c);
-                }
-                RetryAfter(secs) => {
-                    tokio::time::sleep(secs.duration()).await;
-                }
-                _ => {
-                    tokio::time::sleep(delay).await;
-                    delay *= MULTIPLIER;
-                }
-            }
-        } else {
-            break;
-        }
-
-        log::info!("Retrying ...")
-    }
-
-    update
-}
-
-async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
-    let channel = fetch_feed(FEED_URL).await?;
-    let client = reqwest::Client::new();
-
-    for item in &channel.item {
+    for item in &feed_content.item {
         let Some(volfdnr) = item
             .link
             .strip_prefix("https://www.bonn.sitzung-online.de/vo020?VOLFDNR=")
@@ -294,37 +228,32 @@ async fn do_update(bot: &Bot, redis: &mut RedisClient) -> Result<(), Error> {
             continue;
         };
 
-        // if this fails, just abort the whole operation. If redis is down, we will just try again on a later invocation.
-        if !redis.add_item(volfdnr).await? {
+        // if this fails, it is ok to abort the whole operation. If redis is down, we will just try again on a later invocation.
+        if db.has_item(volfdnr).await? {
             continue; // item already known
         }
 
-        let Some((msg, gremien, buttons)) = generate_notification(&client, item).await else {
+        let Some((msg, gremien)) = generate_notification(&http_client, item).await else {
             continue;
         };
 
-        for (user, gremium) in redis.get_chats().await? {
-            if !(gremium.is_empty() || gremien.contains(&gremium)) {
-                continue;
-            }
+        let chats = chats
+            .iter()
+            .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(&gremium))
+            .map(|(chat_id, _)| *chat_id);
 
-            match send_message(bot, user, &msg, &buttons).await {
-                UpdateChatId::Keep => (),
-                UpdateChatId::Remove => {
-                    let _ = redis.unregister_chat(user).await;
-                }
-                UpdateChatId::Migrate(c) => {
-                    let _ = redis.migrate_chat(user, c).await;
-                }
-            }
-        }
+        db.queue_messages(volfdnr, &msg, chats).await?;
     }
 
     Ok(())
 }
 
-pub async fn feed_updater(bot: Bot, mut redis: RedisClient, mut shutdown: oneshot::Receiver<()>) {
-    let mut interval = interval(Duration::from_secs(900));
+pub async fn run_task(
+    update_interval: Duration,
+    mut db: RedisClient,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut interval = interval(update_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
     loop {
@@ -334,20 +263,10 @@ pub async fn feed_updater(bot: Bot, mut redis: RedisClient, mut shutdown: onesho
         };
 
         log::info!("Updating ...");
-        match do_update(&bot, &mut redis).await {
+
+        match do_update(&mut db).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
-    }
-}
-
-// As soon as this fails, the error handling in `send_message` must be adapted
-#[test]
-fn test_api_error_not_yet_added() {
-    use teloxide::ApiError;
-
-    for msg in ADDITIONAL_ERRORS {
-        let api_error: ApiError = serde_json::from_str(&format!("\"{msg}\"")).unwrap();
-        assert_eq!(api_error, ApiError::Unknown(msg.to_string()));
     }
 }
