@@ -35,7 +35,7 @@ enum Error {
     #[error("invalid feed format: {0}")]
     ParseXML(#[from] serde_xml_rs::Error),
     #[error("db error: {0}")]
-    DbError(#[from] DatabaseError),
+    Database(#[from] DatabaseError),
     #[error("parsing url failed: {0}")]
     ParseUrl(#[from] url::ParseError),
 }
@@ -234,7 +234,7 @@ async fn do_update(feed_url: Url, db: &mut DatabaseClient) -> Result<(), Error> 
 
         let chats = chats
             .iter()
-            .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(&gremium))
+            .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(gremium))
             .map(|(chat_id, _)| *chat_id);
 
         db.queue_messages(&volfdnr, &msg, chats).await?;
