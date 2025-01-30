@@ -62,7 +62,6 @@ struct Item {
 
 async fn fetch_feed(url: &str) -> Result<Channel, Error> {
     let response = reqwest::get(url).await?.text().await?;
-    log::info!("Here");
     let rss: Rss = serde_xml_rs::from_str(&response)?;
     Ok(rss.channel)
 }
@@ -207,14 +206,10 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
 }
 
 async fn do_update(db: &mut RedisClient) -> Result<(), Error> {
-    log::info!("Here");
-
     let feed_content = fetch_feed(FEED_URL).await?;
     let http_client = reqwest::Client::new();
-    log::info!("Here!");
 
     let chats = db.get_chats().await?;
-    log::info!("Here?");
 
     for item in &feed_content.item {
         let Some(volfdnr) = item

@@ -81,10 +81,8 @@ impl RedisClient {
     }
 
     pub async fn get_chats(&mut self) -> Result<BTreeMap<ChatId, String>, DatabaseError> {
-        log::info!("Begins");
         let user_ids: BTreeMap<i64, String> =
             self.client().await?.hgetall(REGISTERED_CHATS_KEY).await?;
-        log::info!("Ends");
         Ok(user_ids.into_iter().map(|(k, v)| (ChatId(k), v)).collect())
     }
 
