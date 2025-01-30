@@ -6,7 +6,7 @@ mod message_queue;
 use std::process::ExitCode;
 
 use clap::Parser;
-use database::RedisClient;
+use database::DatabaseClient;
 
 use crate::allris_scraper::AllrisUrl;
 
@@ -61,7 +61,7 @@ async fn main() -> ExitCode {
 
     init_logging(&args);
 
-    let redis_client = match RedisClient::new(&args.redis_url).await {
+    let db = match DatabaseClient::new(&args.redis_url).await {
         Ok(client) => client,
         Err(e) => {
             log::error!("Redis connection failed: {e}");
@@ -74,13 +74,12 @@ async fn main() -> ExitCode {
     let dispatcher = if args.ignore_messages {
         bot_commands::DispatcherTask::do_nothing()
     } else {
-        bot_commands::DispatcherTask::new(bot.clone(), redis_client.clone())
+        bot_commands::DispatcherTask::new(bot.clone(), db.clone())
     };
 
-    let scraper =
-        allris_scraper::Scraper::new(args.allris_url, args.update_interval, redis_client.clone());
+    let scraper = allris_scraper::Scraper::new(args.allris_url, args.update_interval, db.clone());
 
-    let _ = tokio::spawn(message_queue::task(bot.clone(), redis_client));
+    let _ = tokio::spawn(message_queue::task(bot.clone(), db));
 
     match tokio::signal::ctrl_c().await {
         Ok(_) => (),

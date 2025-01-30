@@ -2,7 +2,7 @@ use teloxide::dispatching::ShutdownToken;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
-use crate::database::RedisClient;
+use crate::database::DatabaseClient;
 use crate::Bot;
 
 #[derive(BotCommands, Clone, Debug)]
@@ -26,14 +26,14 @@ async fn handle_message(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    mut redis_client: RedisClient,
+    mut db: DatabaseClient,
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start(gremium) => {
             let reply = if gremium.len() >= 256 {
                 "Name des Gremiums zu lang!"
             } else {
-                match redis_client.register_chat(msg.chat.id, &gremium).await {
+                match db.register_chat(msg.chat.id, &gremium).await {
                     Ok(true) => {
                         log::info!("Chat {} registered: {gremium}", msg.chat.id);
                         "Du hast dich erfolgreich für Benachrichtigungen registriert."
@@ -49,7 +49,7 @@ async fn handle_message(
             bot.send_message(msg.chat.id, reply).await?;
         }
         Command::Stop => {
-            let reply = match redis_client.unregister_chat(msg.chat.id).await {
+            let reply = match db.unregister_chat(msg.chat.id).await {
                 Ok(true) => {
                     log::info!("Chat {} unregistered", msg.chat.id);
                     "Du hast die Benachrichtigungen abbestellt."
@@ -81,10 +81,10 @@ fn is_channel_perm_update(update: ChatMemberUpdated) -> bool {
 
 async fn handle_perm_update(
     update: ChatMemberUpdated,
-    mut redis_client: RedisClient,
+    mut db: DatabaseClient,
 ) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
-        match redis_client.register_chat(update.chat.id, "").await {
+        match db.register_chat(update.chat.id, "").await {
             Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Adding channel \"{}\" failed: {e}",
@@ -92,7 +92,7 @@ async fn handle_perm_update(
             ),
         }
     } else {
-        match redis_client.unregister_chat(update.chat.id).await {
+        match db.unregister_chat(update.chat.id).await {
             Ok(_) => log::info!("Removed channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Removing channel \"{}\" failed: {e}",
@@ -106,7 +106,7 @@ async fn handle_perm_update(
 
 fn create(
     bot: Bot,
-    redis_client: RedisClient,
+    db: DatabaseClient,
 ) -> Dispatcher<Bot, teloxide::RequestError, teloxide::dispatching::DefaultKey> {
     let handler = dptree::entry()
         .inspect(|u: Update| log::info!("{u:#?}"))
@@ -122,7 +122,7 @@ fn create(
         );
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![redis_client])
+        .dependencies(dptree::deps![db])
         .error_handler(LoggingErrorHandler::with_custom_text(
             "An error has occurred in the dispatcher",
         ))
@@ -136,8 +136,8 @@ pub struct DispatcherTask {
 
 impl DispatcherTask {
     /// Creates a dispatcher to handle the bot's incoming messages.
-    pub fn new(bot: Bot, redis_client: RedisClient) -> Self {
-        let mut dispatcher = create(bot, redis_client);
+    pub fn new(bot: Bot, db: DatabaseClient) -> Self {
+        let mut dispatcher = create(bot, db);
         let token = dispatcher.shutdown_token();
         tokio::spawn(async move { dispatcher.dispatch().await });
 

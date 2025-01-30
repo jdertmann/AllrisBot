@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use teloxide::types::ChatId;
+use thiserror::Error;
 
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
@@ -25,11 +26,11 @@ pub struct Message {
 }
 
 #[derive(Clone)]
-pub struct RedisClient {
+pub struct DatabaseClient {
     pool: bb8::Pool<RedisConnectionManager>,
 }
 
-impl RedisClient {
+impl DatabaseClient {
     async fn client(
         &self,
     ) -> Result<bb8::PooledConnection<'_, RedisConnectionManager>, DatabaseError> {
@@ -40,7 +41,7 @@ impl RedisClient {
     pub async fn new(redis_url: &str) -> Result<Self, DatabaseError> {
         let manager = RedisConnectionManager::new(redis_url)?;
         let pool = bb8::Pool::builder().build(manager).await?;
-        Ok(RedisClient { pool })
+        Ok(DatabaseClient { pool })
     }
 
     pub async fn register_chat(
@@ -139,15 +140,15 @@ impl RedisClient {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum DatabaseError {
-    #[error("Redis error")]
+    #[error("{0}")]
     RedisError(#[from] redis::RedisError),
-    #[error("Pool timeout")]
+    #[error("connection pool timed out")]
     PoolTimeout,
-    #[error("deserialization error")]
-    SerdeError(#[from] serde_json::Error),
-    #[error("database entry invalid")]
+    #[error("deserialization failed: {0}")]
+    DeserializationError(#[from] serde_json::Error),
+    #[error("invalid entry")]
     InvalidEntryError,
 }
 

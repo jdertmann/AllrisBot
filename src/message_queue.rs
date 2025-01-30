@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 use teloxide::types::InlineKeyboardMarkup;
 
-use crate::database::{Message, RedisClient};
+use crate::database::{Message, DatabaseClient};
 use crate::Bot;
 
 const ADDITIONAL_ERRORS: &[&str] = &[
@@ -143,11 +143,11 @@ async fn send_message(
     update
 }
 
-pub async fn task(bot: Bot, mut redis_client: RedisClient) {
+pub async fn task(bot: Bot, mut db: DatabaseClient) {
     let mut global_rate_limiter = RateLimiter::new(Duration::from_secs(1), 30);
     let mut rate_limiters: HashMap<ChatId, (RateLimiter, RateLimiter)> = HashMap::new();
     loop {
-        let (chat_id, msg) = redis_client.pop_message().await.unwrap();
+        let (chat_id, msg) = db.pop_message().await.unwrap();
         let (rl1, rl2) = rate_limiters.entry(chat_id).or_insert_with(|| {
             (
                 RateLimiter::new(Duration::from_secs(60), 20),

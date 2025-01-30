@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
-use crate::database::{self, Message, RedisClient};
+use crate::database::{DatabaseClient, DatabaseError, Message};
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -35,7 +35,7 @@ enum Error {
     #[error("invalid feed format: {0}")]
     ParseXML(#[from] serde_xml_rs::Error),
     #[error("db error: {0}")]
-    DbError(#[from] database::DatabaseError),
+    DbError(#[from] DatabaseError),
     #[error("parsing url failed: {0}")]
     ParseUrl(#[from] url::ParseError),
 }
@@ -203,7 +203,7 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
     ))
 }
 
-async fn do_update(feed_url: Url, db: &mut RedisClient) -> Result<(), Error> {
+async fn do_update(feed_url: Url, db: &mut DatabaseClient) -> Result<(), Error> {
     let feed_content = fetch_feed(feed_url).await?;
     let http_client = reqwest::Client::new();
 
@@ -266,7 +266,7 @@ impl AllrisUrl {
 async fn run(
     allris_url: AllrisUrl,
     update_interval: Duration,
-    mut db: RedisClient,
+    mut db: DatabaseClient,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let feed_url = allris_url.feed_url();
@@ -295,12 +295,12 @@ pub struct Scraper {
 }
 
 impl Scraper {
-    pub fn new(allris_url: AllrisUrl, update_interval: u64, redis_client: RedisClient) -> Self {
+    pub fn new(allris_url: AllrisUrl, update_interval: u64, db: DatabaseClient) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(run(
             allris_url,
             Duration::from_secs(update_interval),
-            redis_client.clone(),
+            db.clone(),
             shutdown_rx,
         ));
 
