@@ -122,21 +122,32 @@ impl DatabaseClient {
         Ok(result)
     }
 
-    pub async fn pop_message(&mut self) -> Result<(ChatId, Message), DatabaseError> {
-        let (_, msg): ((), String) = self
+    pub async fn pop_message(
+        &mut self,
+        timeout: f64,
+    ) -> Result<Option<(ChatId, Message)>, DatabaseError> {
+        let response: Option<((), String)> = self
             .client()
             .await?
-            .brpop(SCHEDULED_MESSAGES_KEY, 0.)
+            .brpop(SCHEDULED_MESSAGES_KEY, timeout)
             .await?;
+
+        let msg = match response {
+            Some(((), msg)) => msg,
+            None => {
+                return Ok(None);
+            }
+        };
 
         let (chat_id, msg) = msg
             .split_once(':')
             .ok_or(DatabaseError::InvalidEntryError)?;
-        let msg = serde_json::from_str(&msg)?;
+        let msg = serde_json::from_str(msg)?;
         let chat_id = chat_id
             .parse()
             .map_err(|_| DatabaseError::InvalidEntryError)?;
-        return Ok((ChatId(chat_id), msg));
+
+        Ok(Some((ChatId(chat_id), msg)))
     }
 }
 
