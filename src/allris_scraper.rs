@@ -263,7 +263,7 @@ impl AllrisUrl {
     }
 }
 
-pub async fn run_task(
+async fn run(
     allris_url: AllrisUrl,
     update_interval: Duration,
     mut db: RedisClient,
@@ -286,5 +286,32 @@ pub async fn run_task(
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
+    }
+}
+
+pub struct Scraper {
+    shutdown_tx: oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Scraper {
+    pub fn new(allris_url: AllrisUrl, update_interval: u64, redis_client: RedisClient) -> Self {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run(
+            allris_url,
+            Duration::from_secs(update_interval),
+            redis_client.clone(),
+            shutdown_rx,
+        ));
+
+        Self {
+            shutdown_tx,
+            handle,
+        }
+    }
+
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.handle.await;
     }
 }

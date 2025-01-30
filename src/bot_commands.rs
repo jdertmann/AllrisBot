@@ -1,3 +1,4 @@
+use teloxide::dispatching::ShutdownToken;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
@@ -103,7 +104,7 @@ async fn handle_perm_update(
     Ok(())
 }
 
-pub fn create(
+fn create(
     bot: Bot,
     redis_client: RedisClient,
 ) -> Dispatcher<Bot, teloxide::RequestError, teloxide::dispatching::DefaultKey> {
@@ -127,4 +128,32 @@ pub fn create(
         ))
         .default_handler(|_| async {})
         .build()
+}
+
+pub struct DispatcherTask {
+    token: Option<ShutdownToken>,
+}
+
+impl DispatcherTask {
+    /// Creates a dispatcher to handle the bot's incoming messages.
+    pub fn new(bot: Bot, redis_client: RedisClient) -> Self {
+        let mut dispatcher = create(bot, redis_client);
+        let token = dispatcher.shutdown_token();
+        tokio::spawn(async move { dispatcher.dispatch().await });
+
+        Self { token: Some(token) }
+    }
+
+    /// Does nothing but simplifies control flow in main function
+    pub fn do_nothing() -> Self {
+        Self { token: None }
+    }
+
+    pub async fn shutdown(self) {
+        if let Some(token) = self.token {
+            if let Ok(f) = token.shutdown() {
+                f.await
+            }
+        }
+    }
 }
