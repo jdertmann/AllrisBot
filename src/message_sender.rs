@@ -81,6 +81,8 @@ async fn attempt_send_message(
     let mut delay = BASE_RETRY_DELAY;
     let mut chat_status = ChatStatus::Active;
 
+    let mut error = true;
+
     for _ in 0..RETRY_LIMIT {
         let mut request = bot
             .send_message(chat_id, &msg.text)
@@ -123,11 +125,15 @@ async fn attempt_send_message(
                 }
             }
         } else {
+            error = false;
             break;
         }
     }
 
-    log::error!("Sending message failed!");
+    if error {
+        log::error!("Sending message failed repeatedly, skipping ...");
+    }
+
     chat_status
 }
 
