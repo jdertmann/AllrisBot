@@ -45,7 +45,7 @@ impl DatabaseClient {
     }
 
     pub async fn register_chat(
-        &mut self,
+        &self,
         chat_id: ChatId,
         gremium: &str,
     ) -> Result<bool, DatabaseError> {
@@ -57,7 +57,7 @@ impl DatabaseClient {
         Ok(added)
     }
 
-    pub async fn unregister_chat(&mut self, chat_id: ChatId) -> Result<bool, DatabaseError> {
+    pub async fn unregister_chat(&self, chat_id: ChatId) -> Result<bool, DatabaseError> {
         let removed = self
             .client()
             .await?
@@ -67,7 +67,7 @@ impl DatabaseClient {
     }
 
     pub async fn migrate_chat(
-        &mut self,
+        &self,
         old_chat_id: ChatId,
         new_chat_id: ChatId,
     ) -> Result<(), DatabaseError> {
@@ -81,13 +81,13 @@ impl DatabaseClient {
         Ok(())
     }
 
-    pub async fn get_chats(&mut self) -> Result<BTreeMap<ChatId, String>, DatabaseError> {
+    pub async fn get_chats(&self) -> Result<BTreeMap<ChatId, String>, DatabaseError> {
         let user_ids: BTreeMap<i64, String> =
             self.client().await?.hgetall(REGISTERED_CHATS_KEY).await?;
         Ok(user_ids.into_iter().map(|(k, v)| (ChatId(k), v)).collect())
     }
 
-    pub async fn has_item(&mut self, item: &str) -> Result<bool, DatabaseError> {
+    pub async fn has_item(&self, item: &str) -> Result<bool, DatabaseError> {
         let result = self
             .client()
             .await?
@@ -98,7 +98,7 @@ impl DatabaseClient {
     }
 
     pub async fn queue_messages(
-        &mut self,
+        &self,
         item: &str,
         msg: &Message,
         chats: impl Iterator<Item = ChatId>,
@@ -123,7 +123,7 @@ impl DatabaseClient {
     }
 
     pub async fn pop_message(
-        &mut self,
+        &self,
         timeout: f64,
     ) -> Result<Option<(ChatId, Message)>, DatabaseError> {
         let response: Option<((), String)> = self

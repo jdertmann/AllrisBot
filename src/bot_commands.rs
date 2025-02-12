@@ -26,7 +26,7 @@ async fn handle_message(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    mut db: DatabaseClient,
+    db: DatabaseClient,
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start(gremium) => {
@@ -79,10 +79,7 @@ fn is_channel_perm_update(update: ChatMemberUpdated) -> bool {
     }
 }
 
-async fn handle_perm_update(
-    update: ChatMemberUpdated,
-    mut db: DatabaseClient,
-) -> ResponseResult<()> {
+async fn handle_perm_update(update: ChatMemberUpdated, db: DatabaseClient) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
         match db.register_chat(update.chat.id, "").await {
             Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),

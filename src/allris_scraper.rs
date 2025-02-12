@@ -204,7 +204,7 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
     ))
 }
 
-async fn do_update(feed_url: Url, db: &mut DatabaseClient) -> Result<(), Error> {
+async fn do_update(feed_url: Url, db: &DatabaseClient) -> Result<(), Error> {
     let feed_content = fetch_feed(feed_url).await?;
     let http_client = reqwest::Client::new();
 
@@ -267,7 +267,7 @@ impl AllrisUrl {
 async fn run(
     allris_url: AllrisUrl,
     update_interval: Duration,
-    mut db: DatabaseClient,
+    db: DatabaseClient,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let feed_url = allris_url.feed_url();
@@ -283,7 +283,7 @@ async fn run(
 
         log::info!("Updating ...");
 
-        match do_update(feed_url.clone(), &mut db).await {
+        match do_update(feed_url.clone(), &db).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }

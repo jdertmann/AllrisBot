@@ -138,7 +138,7 @@ async fn attempt_send_message(
 }
 
 /// Main task loop handling message dispatching.
-async fn sender_task(bot: Bot, mut db: DatabaseClient, shutdown: Weak<()>) {
+async fn sender_task(bot: Bot, db: DatabaseClient, shutdown: Weak<()>) {
     let mut chat_rate_limiters: HashMap<ChatId, [RateLimiter; 2]> = HashMap::new();
 
     // at most 30 messages per second, i.e. one every 33.3 milliseconds
