@@ -19,8 +19,6 @@ lazy_static! {
         redis::Script::new(include_str!("redis_scripts/migrate_chat.lua"));
     static ref QUEUE_MESSAGES_SCRIPT: redis::Script =
         redis::Script::new(include_str!("redis_scripts/queue_messages.lua"));
-    static ref HPOP_SCRIPT: redis::Script =
-        redis::Script::new(include_str!("redis_scripts/hpop.lua"));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,11 +188,13 @@ impl DatabaseClient {
     }
 
     pub async fn pop_message(&self, key: &ScheduledMessageKey) -> Result<Message, DatabaseError> {
-        let msg: String = HPOP_SCRIPT
-            .key(SCHEDULED_MESSAGES_KEY)
-            .arg(key.key())
-            .invoke_async(&mut *self.client().await?)
+        let (msg, _): (String, ()) = redis::pipe()
+            .atomic()
+            .hget(SCHEDULED_MESSAGES_KEY, key.key())
+            .hdel(SCHEDULED_MESSAGES_KEY, key.key())
+            .query_async(&mut *self.client().await?)
             .await?;
+
         let msg = serde_json::from_str(&msg)?;
         Ok(msg)
     }
