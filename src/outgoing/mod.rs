@@ -19,6 +19,7 @@ const ADDITIONAL_ERRORS: &[&str] = &[
 ];
 
 pub type MessageDispatcher = dispatcher::MessageDispatcher<ScheduledMessageKey>;
+pub type DispatcherTask = dispatcher::DispatcherTask<ScheduledMessageKey>;
 
 impl QueueEntry for ScheduledMessageKey {
     type Params = (crate::Bot, DatabaseClient);
@@ -117,7 +118,7 @@ async fn send_message(bot: &Bot, chat_id: ChatId, msg: &Message) -> SendResult {
                 // todo: handle migrate
                 SendResult::ChatInvalid
             }
-            RetryAfter(secs) => return SendResult::RetryAfter(secs.duration()),
+            RetryAfter(secs) => SendResult::RetryAfter(secs.duration()),
             _ => SendResult::Failed,
         }
     } else {

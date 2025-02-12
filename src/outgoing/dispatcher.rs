@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::timeout_at;
 use tokio_stream::{Stream, StreamExt};
 
@@ -243,14 +244,14 @@ fn throttle<T>(
     }
 }
 enum Msg {
-    HardShutdown,
-    SoftShutdown,
+    Shutdown { hard: bool },
 }
 
 async fn chat_task<E: QueueEntry>(
     params: E::Params,
     queue: Arc<Queue<E>>,
     broadcast_limiter: SemaphoreRateLimiter,
+    on_exit: impl FnOnce(),
     mut rx: mpsc::UnboundedReceiver<Msg>,
 ) {
     let mut entries = pin!(queue.entry_stream(broadcast_limiter));
@@ -260,12 +261,16 @@ async fn chat_task<E: QueueEntry>(
     let mut soft_shutdown = false;
 
     loop {
+        if soft_shutdown && current_entry.is_none() && queue.lock_queue().is_empty() {
+            break;
+        }
+
         tokio::select! {
             biased;
             msg = rx.recv() => {
                 match msg {
-                    None | Some(Msg::HardShutdown) => break,
-                    Some(Msg::SoftShutdown) => {
+                    None | Some(Msg::Shutdown { hard: true }) => break,
+                    Some(Msg::Shutdown { hard: false }) => {
                         soft_shutdown = true;
                     }
                 }
@@ -280,26 +285,22 @@ async fn chat_task<E: QueueEntry>(
                 let (permit, entry) = current_entry.take().unwrap();
                 match entry.process(&params).await {
                     Ok(()) => {
-                        permit.map(|x| x.sent());
-                    }
+                        if let Some(permit) = permit {
+                            permit.sent();
+                        }                     }
                     Err(QueueEntryError::Retry { entry, retry_after }) => {
                         current_entry = Some((permit, entry));
                         retry_timer.set(tokio::time::sleep(retry_after));
                     },
                     Err(QueueEntryError::ChatInvalid) => {
-                        permit.map(|x| x.sent()); // don't know if necessary?
+                        if let Some(permit) = permit {
+                            permit.sent();
+                        }
                         queue.invalidate();
                         break;
                     }
                 }
             },
-            () = std::future::ready(()), if soft_shutdown && current_entry.is_none() => {
-                // This will be called only if
-                // - soft_shutdown is set to true
-                // - there is no entry currently being processed
-                // - none of the above futures finish immediately (due to `biased`), in particular the queue is empty
-                break
-            }
         }
     }
 
@@ -309,69 +310,136 @@ async fn chat_task<E: QueueEntry>(
             entry.delete(&params).await;
         }
     }
+
+    on_exit()
 }
 
 pub struct ChatTask<E: QueueEntry> {
     tx: mpsc::UnboundedSender<Msg>,
     queue: Arc<Queue<E>>,
-    handle: tokio::task::JoinHandle<()>,
 }
 
 impl<E: QueueEntry> ChatTask<E> {
-    pub fn new(params: E::Params, broadcast_limiter: SemaphoreRateLimiter) -> Self {
+    pub fn new(
+        params: E::Params,
+        broadcast_limiter: SemaphoreRateLimiter,
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let queue: Arc<Queue<E>> = Arc::new(Queue::new());
-        let handle = tokio::spawn(chat_task(params, queue.clone(), broadcast_limiter, rx));
-        ChatTask { tx, queue, handle }
+        tokio::spawn(chat_task(
+            params,
+            queue.clone(),
+            broadcast_limiter,
+            on_exit,
+            rx,
+        ));
+        ChatTask { tx, queue }
     }
 
     pub fn queue(&self) -> &Queue<E> {
         &self.queue
     }
 
-    // Stop as soon as the queue is empty
-    pub fn soft_shutdown(&self) {
-        let _ = self.tx.send(Msg::SoftShutdown);
+    pub fn shutdown(&self, hard: bool) {
+        let _ = self.tx.send(Msg::Shutdown { hard });
+    }
+}
+
+enum DispatcherMsg<E: QueueEntry> {
+    Enqueue(E),
+    Shutdown { hard: bool },
+    DropChatTask(E::Chat),
+}
+
+pub struct DispatcherTask<E: QueueEntry> {
+    tx: mpsc::UnboundedSender<DispatcherMsg<E>>,
+    handle: JoinHandle<()>,
+}
+
+impl<E: QueueEntry> DispatcherTask<E>
+where
+    E::Params: Clone,
+{
+    pub fn new(params: E::Params) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<DispatcherMsg<E>>();
+
+        let tx2 = tx.clone();
+
+        let handle = tokio::spawn(async move {
+            let limiter = SemaphoreRateLimiter::new(BROADCASTS_PER_SECOND, Duration::from_secs(1));
+
+            let mut tasks = HashMap::new();
+            let mut shutdown = false;
+
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    DispatcherMsg::Enqueue(e) => {
+                        if shutdown {
+                            continue;
+                        }
+
+                        let chat = e.get_chat();
+
+                        let task = tasks.entry(chat).or_insert_with(|| {
+                            let tx_clone = tx2.clone();
+                            let on_exit = move || {
+                                let _ = tx_clone.send(DispatcherMsg::DropChatTask(chat));
+                            };
+                            ChatTask::new(params.clone(), limiter.clone(), on_exit)
+                        });
+
+                        task.queue().add_item(e);
+                    }
+                    DispatcherMsg::DropChatTask(chat) => {
+                        tasks.remove(&chat);
+                    }
+                    DispatcherMsg::Shutdown { hard } => {
+                        shutdown = true;
+                        for task in tasks.values() {
+                            task.shutdown(hard);
+                        }
+                    }
+                }
+
+                if shutdown && tasks.is_empty() {
+                    break;
+                }
+            }
+        });
+
+        Self { tx, handle }
     }
 
-    /// Stop as soon as possible. Messages that are not sent are persisted
-    pub fn hard_shutdown(&self) {
-        let _ = self.tx.send(Msg::HardShutdown);
+    pub fn sender(&self) -> MessageDispatcher<E> {
+        MessageDispatcher {
+            tx: self.tx.clone(),
+        }
     }
 
-    pub fn join_handle(&mut self) -> &mut tokio::task::JoinHandle<()> {
+    pub fn shutdown(&self, hard: bool) {
+        let _ = self.tx.send(DispatcherMsg::Shutdown { hard });
+    }
+
+    pub fn join_handle(&mut self) -> &mut JoinHandle<()> {
         &mut self.handle
     }
 }
 
 pub struct MessageDispatcher<E: QueueEntry> {
-    params: E::Params,
-    broadcast_limiter: SemaphoreRateLimiter,
-    tasks: Mutex<HashMap<E::Chat, ChatTask<E>>>,
+    tx: mpsc::UnboundedSender<DispatcherMsg<E>>,
 }
 
-impl<E: QueueEntry> MessageDispatcher<E>
-where
-    E::Params: Clone,
-{
-    pub fn new(params: E::Params) -> Self {
-        let broadcast_limiter =
-            SemaphoreRateLimiter::new(BROADCASTS_PER_SECOND, Duration::from_secs(1));
-        let tasks = Mutex::new(HashMap::new());
-
-        MessageDispatcher {
-            params,
-            broadcast_limiter,
-            tasks,
-        }
-    }
-
+impl<E: QueueEntry> MessageDispatcher<E> {
     pub fn dispatch(&self, entry: E) {
-        let mut tasks = self.tasks.lock().expect("shouldn't be poisoned");
-        let task = tasks
-            .entry(entry.get_chat())
-            .or_insert_with(|| ChatTask::new(self.params.clone(), self.broadcast_limiter.clone()));
+        let _ = self.tx.send(DispatcherMsg::Enqueue(entry));
+    }
+}
 
-        task.queue().add_item(entry);
+impl<E: QueueEntry> Clone for MessageDispatcher<E> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+        }
     }
 }
