@@ -12,6 +12,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use url::Url;
 
 use crate::database::{DatabaseClient, DatabaseError, Message};
+use crate::outgoing::MessageDispatcher;
 
 lazy_static! {
     static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
@@ -204,7 +205,11 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
     ))
 }
 
-async fn do_update(feed_url: Url, db: &DatabaseClient) -> Result<(), Error> {
+async fn do_update(
+    feed_url: Url,
+    db: &DatabaseClient,
+    message_dispatcher: &MessageDispatcher,
+) -> Result<(), Error> {
     let feed_content = fetch_feed(feed_url).await?;
     let http_client = reqwest::Client::new();
 
@@ -238,7 +243,10 @@ async fn do_update(feed_url: Url, db: &DatabaseClient) -> Result<(), Error> {
             .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(gremium))
             .map(|(chat_id, _)| *chat_id);
 
-        db.queue_messages(&volfdnr, &msg, chats).await?;
+        let keys = db.queue_messages(&volfdnr, &msg, chats).await?;
+        for key in keys {
+            message_dispatcher.dispatch(key);
+        }
     }
 
     Ok(())
@@ -268,6 +276,7 @@ async fn run(
     allris_url: AllrisUrl,
     update_interval: Duration,
     db: DatabaseClient,
+    message_dispatcher: MessageDispatcher,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let feed_url = allris_url.feed_url();
@@ -283,7 +292,7 @@ async fn run(
 
         log::info!("Updating ...");
 
-        match do_update(feed_url.clone(), &db).await {
+        match do_update(feed_url.clone(), &db, &message_dispatcher).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
@@ -296,12 +305,18 @@ pub struct Scraper {
 }
 
 impl Scraper {
-    pub fn new(allris_url: AllrisUrl, update_interval: u64, db: DatabaseClient) -> Self {
+    pub fn new(
+        allris_url: AllrisUrl,
+        update_interval: u64,
+        db: DatabaseClient,
+        message_dispatcher: MessageDispatcher,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(run(
             allris_url,
             Duration::from_secs(update_interval),
             db.clone(),
+            message_dispatcher,
             shutdown_rx,
         ));
 

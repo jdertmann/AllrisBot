@@ -1,12 +1,13 @@
 mod allris_scraper;
 mod bot_commands;
 mod database;
-mod message_sender;
+mod outgoing;
 
 use std::process::ExitCode;
 
 use clap::Parser;
 use database::DatabaseClient;
+use outgoing::MessageDispatcher;
 
 use crate::allris_scraper::AllrisUrl;
 
@@ -77,8 +78,14 @@ async fn main() -> ExitCode {
         bot_commands::DispatcherTask::new(bot.clone(), db.clone())
     };
 
-    let scraper = allris_scraper::Scraper::new(args.allris_url, args.update_interval, db.clone());
-    let sender = message_sender::MessageSender::new(bot, db);
+    let message_dispatcher = MessageDispatcher::new((bot.clone(), db.clone()));
+
+    let scraper = allris_scraper::Scraper::new(
+        args.allris_url,
+        args.update_interval,
+        db.clone(),
+        message_dispatcher,
+    );
 
     match tokio::signal::ctrl_c().await {
         Ok(_) => (),
@@ -87,8 +94,6 @@ async fn main() -> ExitCode {
 
     log::info!("Shutting down ...");
     let _ = tokio::join!(dispatcher.shutdown(), scraper.shutdown());
-
-    sender.shutdown().await;
 
     ExitCode::SUCCESS
 }
