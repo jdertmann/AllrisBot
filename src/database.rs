@@ -148,6 +148,19 @@ impl DatabaseClient {
         Ok(result)
     }
 
+    pub async fn add_message(
+        &self,
+        key: &ScheduledMessageKey,
+        msg: &Message,
+    ) -> Result<(), DatabaseError> {
+        let msg = serde_json::to_string(&msg).unwrap();
+        self.client()
+            .await?
+            .hset(SCHEDULED_MESSAGES_KEY, key.key(), &msg)
+            .await?;
+        Ok(())
+    }
+
     pub async fn queue_messages(
         &self,
         volfdnr: &str,
@@ -197,6 +210,15 @@ impl DatabaseClient {
 
         let msg = serde_json::from_str(&msg)?;
         Ok(msg)
+    }
+
+    pub async fn delete_message(&self, key: &ScheduledMessageKey) -> Result<bool, DatabaseError> {
+        let removed = self
+            .client()
+            .await?
+            .hdel(SCHEDULED_MESSAGES_KEY, key.key())
+            .await?;
+        Ok(removed)
     }
 }
 

@@ -3,10 +3,12 @@ use std::future::Future;
 use std::hash::Hash;
 use std::ops::DerefMut;
 use std::pin::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::timeout_at;
 use tokio_stream::{Stream, StreamExt};
 
 const GROUP_MESSAGES_PER_MINUTE: usize = 20;
@@ -96,7 +98,7 @@ impl SlidingWindowRateLimiter {
     }
 }
 
-pub trait QueueEntry: Ord + Send + 'static {
+pub trait QueueEntry: Ord + Send + Sized + 'static {
     type Params: Send;
     type Chat: Send + Copy + Hash + Eq;
 
@@ -104,12 +106,23 @@ pub trait QueueEntry: Ord + Send + 'static {
 
     fn get_chat(&self) -> Self::Chat;
 
-    fn process(self, p: &Self::Params) -> impl Future<Output = ()> + Send;
+    fn process(
+        self,
+        p: &Self::Params,
+    ) -> impl Future<Output = Result<(), QueueEntryError<Self>>> + Send;
+
+    fn delete(self, p: &Self::Params) -> impl Future<Output = ()> + Send;
+}
+
+pub enum QueueEntryError<Q: QueueEntry> {
+    Retry { entry: Q, retry_after: Duration },
+    ChatInvalid,
 }
 
 pub struct Queue<E: QueueEntry> {
     queue: Mutex<BTreeSet<E>>,
     element_added: Notify,
+    invalidated: AtomicBool,
 }
 
 impl<E: QueueEntry> Queue<E> {
@@ -117,11 +130,20 @@ impl<E: QueueEntry> Queue<E> {
         Self {
             queue: Default::default(),
             element_added: Notify::new(),
+            invalidated: AtomicBool::new(false),
         }
     }
 
     fn lock_queue(&self) -> impl DerefMut<Target = BTreeSet<E>> + '_ {
         self.queue.lock().expect("Mutex should not be poisoned")
+    }
+
+    fn invalidate(&self) {
+        self.invalidated.store(true, Ordering::Relaxed)
+    }
+
+    pub fn invalidated(&self) -> bool {
+        self.invalidated.load(Ordering::Relaxed)
     }
 
     pub fn add_item(&self, item: E) {
@@ -149,6 +171,61 @@ impl<E: QueueEntry> Queue<E> {
             self.element_added.notified().await
         }
     }
+
+    fn entry_stream(
+        &self,
+        broadcast_limiter: SemaphoreRateLimiter,
+    ) -> impl Stream<Item = (Option<RateLimiterPermit>, E)> + '_ {
+        let entries = async_stream::stream! {
+            loop {
+                let next_entry = self.get_next_entry(false).await;
+                if next_entry.is_reply() {
+                    yield (None, next_entry);
+                    continue;
+                }
+
+                let mut acquire = pin!(broadcast_limiter.acquire());
+                loop {
+                    tokio::select! {
+                        next_reply = self.get_next_entry(true) => {
+                            yield (None, next_reply);
+                        },
+                        permit = &mut acquire => {
+                            yield (Some(permit), next_entry);
+                            break;
+                        },
+                    }
+                }
+            }
+        };
+
+        let entries = throttle(entries, Duration::from_secs(1), CHAT_MESSAGES_PER_SECOND);
+
+        let mut interval = 1. / CHAT_MESSAGES_PER_SECOND as f32;
+
+        let entries: Pin<Box<dyn Stream<Item = _> + Send>> = if true {
+            interval = f32::max(interval, 60. / GROUP_MESSAGES_PER_MINUTE as f32);
+            let entries = throttle(entries, Duration::from_secs(60), GROUP_MESSAGES_PER_MINUTE);
+            Box::pin(entries)
+        } else {
+            Box::pin(entries)
+        };
+
+        let mut tick_interval = tokio::time::interval(Duration::from_secs_f32(interval));
+
+        let entries = async_stream::stream! {
+            tick_interval.tick().await;
+            for await entry in entries {
+                yield entry;
+                if self.invalidated() {
+                    break
+                }
+                tick_interval.tick().await;
+            }
+        };
+
+        entries
+    }
 }
 
 fn throttle<T>(
@@ -166,7 +243,8 @@ fn throttle<T>(
     }
 }
 enum Msg {
-    Shutdown,
+    HardShutdown,
+    SoftShutdown,
 }
 
 async fn chat_task<E: QueueEntry>(
@@ -175,60 +253,60 @@ async fn chat_task<E: QueueEntry>(
     broadcast_limiter: SemaphoreRateLimiter,
     mut rx: mpsc::UnboundedReceiver<Msg>,
 ) {
-    let entries = async_stream::stream! {
-        loop {
-            let next_entry = queue.get_next_entry(false).await;
-            if next_entry.is_reply() {
-                yield (None, next_entry);
-                continue;
-            }
-            let mut acquire = pin!(broadcast_limiter.acquire());
-            loop {
-                tokio::select! {
-                    next_reply = queue.get_next_entry(true) => {
-                        yield (None, next_reply);
-                    },
-                    permit = &mut acquire => {
-                        yield (Some(permit), next_entry);
-                        break;
-                    },
-                }
-            }
-        }
-    };
+    let mut entries = pin!(queue.entry_stream(broadcast_limiter));
 
-    let entries = throttle(entries, Duration::from_secs(1), CHAT_MESSAGES_PER_SECOND);
-
-    let mut interval = 1. / CHAT_MESSAGES_PER_SECOND as f32;
-
-    let entries: Pin<Box<dyn Stream<Item = _> + Send>> = if true {
-        interval = f32::max(interval, 60. / GROUP_MESSAGES_PER_MINUTE as f32);
-        let entries = throttle(entries, Duration::from_secs(60), GROUP_MESSAGES_PER_MINUTE);
-        Box::pin(entries)
-    } else {
-        Box::pin(entries)
-    };
-
-    let mut tick_interval = tokio::time::interval(Duration::from_secs_f32(interval));
-
-    let mut entries = pin!(async_stream::stream! {
-        tick_interval.tick().await;
-        for await entry in entries {
-            yield entry;
-            tick_interval.tick().await;
-        }
-    });
+    let mut current_entry = None;
+    let mut retry_timer = pin!(tokio::time::sleep(Duration::ZERO));
+    let mut soft_shutdown = false;
 
     loop {
         tokio::select! {
-            x = entries.next() => {
-                let (permit, entry) = x.expect("Stream will never end");
-                entry.process(&params).await;
-                permit.map(|x| x.sent());
-            },
-            msg = rx.recv() => match msg {
-                None | Some(Msg::Shutdown) => return,
+            biased;
+            msg = rx.recv() => {
+                match msg {
+                    None | Some(Msg::HardShutdown) => break,
+                    Some(Msg::SoftShutdown) => {
+                        soft_shutdown = true;
+                    }
+                }
             }
+            entry = entries.next(), if current_entry.is_none() => {
+                if entry.is_some() {
+                    current_entry = entry;
+                    retry_timer.set(tokio::time::sleep(Duration::ZERO));
+                }
+            }
+            () = &mut retry_timer, if current_entry.is_some() => {
+                let (permit, entry) = current_entry.take().unwrap();
+                match entry.process(&params).await {
+                    Ok(()) => {
+                        permit.map(|x| x.sent());
+                    }
+                    Err(QueueEntryError::Retry { entry, retry_after }) => {
+                        current_entry = Some((permit, entry));
+                        retry_timer.set(tokio::time::sleep(retry_after));
+                    },
+                    Err(QueueEntryError::ChatInvalid) => {
+                        permit.map(|x| x.sent()); // don't know if necessary?
+                        queue.invalidate();
+                        break;
+                    }
+                }
+            },
+            () = std::future::ready(()), if soft_shutdown && current_entry.is_none() => {
+                // This will be called only if
+                // - soft_shutdown is set to true
+                // - there is no entry currently being processed
+                // - none of the above futures finish immediately (due to `biased`), in particular the queue is empty
+                break
+            }
+        }
+    }
+
+    if queue.invalidated() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while let Ok(entry) = timeout_at(deadline, queue.get_next_entry(false)).await {
+            entry.delete(&params).await;
         }
     }
 }
@@ -251,9 +329,18 @@ impl<E: QueueEntry> ChatTask<E> {
         &self.queue
     }
 
-    pub async fn shutdown(self) {
-        self.tx.send(Msg::Shutdown).unwrap();
-        let _ = self.handle.await;
+    // Stop as soon as the queue is empty
+    pub fn soft_shutdown(&self) {
+        let _ = self.tx.send(Msg::SoftShutdown);
+    }
+
+    /// Stop as soon as possible. Messages that are not sent are persisted
+    pub fn hard_shutdown(&self) {
+        let _ = self.tx.send(Msg::HardShutdown);
+    }
+
+    pub fn join_handle(&mut self) -> &mut tokio::task::JoinHandle<()> {
+        &mut self.handle
     }
 }
 
