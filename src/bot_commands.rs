@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use teloxide::dispatching::ShutdownToken;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 
-use crate::database::DatabaseClient;
 use crate::Bot;
+use crate::database::SharedDatabaseConnection;
 
 #[derive(BotCommands, Clone, Debug)]
 #[command(
@@ -26,14 +28,14 @@ async fn handle_message(
     bot: Bot,
     msg: Message,
     cmd: Command,
-    db: DatabaseClient,
+    db: Arc<SharedDatabaseConnection>,
 ) -> ResponseResult<()> {
     match cmd {
         Command::Start(gremium) => {
             let reply = if gremium.len() >= 256 {
                 "Name des Gremiums zu lang!"
             } else {
-                match db.register_chat(msg.chat.id, &gremium).await {
+                match db.add_subscription(msg.chat.id.0, &gremium).await {
                     Ok(true) => {
                         log::info!("Chat {} registered: {gremium}", msg.chat.id);
                         "Du hast dich erfolgreich für Benachrichtigungen registriert."
@@ -49,7 +51,7 @@ async fn handle_message(
             bot.send_message(msg.chat.id, reply).await?;
         }
         Command::Stop => {
-            let reply = match db.unregister_chat(msg.chat.id).await {
+            let reply = match db.remove_subscription(msg.chat.id.0).await {
                 Ok(true) => {
                     log::info!("Chat {} unregistered", msg.chat.id);
                     "Du hast die Benachrichtigungen abbestellt."
@@ -79,9 +81,12 @@ fn is_channel_perm_update(update: ChatMemberUpdated) -> bool {
     }
 }
 
-async fn handle_perm_update(update: ChatMemberUpdated, db: DatabaseClient) -> ResponseResult<()> {
+async fn handle_perm_update(
+    update: ChatMemberUpdated,
+    db: Arc<SharedDatabaseConnection>,
+) -> ResponseResult<()> {
     if update.new_chat_member.can_post_messages() {
-        match db.register_chat(update.chat.id, "").await {
+        match db.add_subscription(update.chat.id.0, "").await {
             Ok(_) => log::info!("Added channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Adding channel \"{}\" failed: {e}",
@@ -89,7 +94,7 @@ async fn handle_perm_update(update: ChatMemberUpdated, db: DatabaseClient) -> Re
             ),
         }
     } else {
-        match db.unregister_chat(update.chat.id).await {
+        match db.remove_subscription(update.chat.id.0).await {
             Ok(_) => log::info!("Removed channel \"{}\"", update.chat.title().unwrap_or("")),
             Err(e) => log::error!(
                 "Removing channel \"{}\" failed: {e}",
@@ -103,7 +108,7 @@ async fn handle_perm_update(update: ChatMemberUpdated, db: DatabaseClient) -> Re
 
 fn create(
     bot: Bot,
-    db: DatabaseClient,
+    db: SharedDatabaseConnection,
 ) -> Dispatcher<Bot, teloxide::RequestError, teloxide::dispatching::DefaultKey> {
     let handler = dptree::entry()
         .inspect(|u: Update| log::info!("{u:#?}"))
@@ -119,7 +124,7 @@ fn create(
         );
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![db])
+        .dependencies(dptree::deps![Arc::new(db)])
         .error_handler(LoggingErrorHandler::with_custom_text(
             "An error has occurred in the dispatcher",
         ))
@@ -133,7 +138,7 @@ pub struct DispatcherTask {
 
 impl DispatcherTask {
     /// Creates a dispatcher to handle the bot's incoming messages.
-    pub fn new(bot: Bot, db: DatabaseClient) -> Self {
+    pub fn new(bot: Bot, db: SharedDatabaseConnection) -> Self {
         let mut dispatcher = create(bot, db);
         let token = dispatcher.shutdown_token();
         tokio::spawn(async move { dispatcher.dispatch().await });

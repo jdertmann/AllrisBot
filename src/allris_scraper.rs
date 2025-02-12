@@ -1,31 +1,39 @@
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use lazy_static::lazy_static;
 use reqwest::Client;
 use scraper::{ElementRef, Html, Selector};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use teloxide::types::InlineKeyboardButton;
 use teloxide::utils::html;
 use thiserror::Error;
-use tokio::sync::oneshot;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
+use tokio_retry::RetryIf;
+use tokio_retry::strategy::ExponentialBackoff;
 use url::Url;
 
-use crate::database::{DatabaseClient, DatabaseError, Message};
+use crate::database::{self, DatabaseConnection};
 
-lazy_static! {
-    static ref TITLE_REGEX: regex::Regex = regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
+static TITLE_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::RegexBuilder::new("</h3>.*<h3>([^<]*)</h3>")
         .dot_matches_new_line(true)
         .build()
-        .unwrap();
-    static ref GREMIEN_SELECTOR: Selector =
-        Selector::parse("#bfTable > table > tbody > tr > td:not(.date) + td:nth-of-type(3)")
-            .unwrap();
-    static ref VOART_SELECTOR: Selector = Selector::parse("#voart").unwrap();
-    static ref VOFAMT_SELECTOR: Selector = Selector::parse("#vofamt").unwrap();
-    static ref VOVERFASSER_SELECTOR: Selector = Selector::parse("#voverfasser1").unwrap();
-    static ref DOKUMENTE_SELECTOR: Selector = Selector::parse("#dokumenteHeaderPanel a").unwrap();
-    static ref TO_LINK_SELECTOR: Selector = Selector::parse("#bfTable .toLink a").unwrap();
+        .unwrap()
+});
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub text: String,
+    pub parse_mode: teloxide::types::ParseMode,
+    pub buttons: Vec<teloxide::types::InlineKeyboardButton>,
+    pub gremien: Vec<String>,
+}
+
+macro_rules! select {
+    ($document:expr, $selector:literal) => {{
+        static SELECTOR: LazyLock<Selector> = LazyLock::new(|| Selector::parse($selector).unwrap());
+        $document.select(&SELECTOR)
+    }};
 }
 
 #[derive(Debug, Error)]
@@ -35,7 +43,7 @@ enum Error {
     #[error("invalid feed format: {0}")]
     ParseXML(#[from] serde_xml_rs::Error),
     #[error("db error: {0}")]
-    Database(#[from] DatabaseError),
+    Database(#[from] database::Error),
     #[error("parsing url failed: {0}")]
     ParseUrl(#[from] url::ParseError),
 }
@@ -58,9 +66,16 @@ struct Item {
     description: String,
 }
 
+#[cfg(not(feature = "feed_from_file"))]
 async fn fetch_feed(url: Url) -> Result<Channel, Error> {
     let response = reqwest::get(url).await?.text().await?;
     let rss: Rss = serde_xml_rs::from_str(&response)?;
+    Ok(rss.channel)
+}
+
+#[cfg(feature = "feed_from_file")]
+async fn fetch_feed(_: Url) -> Result<Channel, Error> {
+    let rss: Rss = serde_xml_rs::from_str(include_str!("../voreleased"))?;
     Ok(rss.channel)
 }
 
@@ -80,60 +95,69 @@ struct WebsiteData {
     amt: Option<String>,
     gremien: Vec<String>,
     sammeldokument: Option<Url>,
-    has_to_link: bool,
+    already_discussed: bool,
 }
 
-async fn scrape_website_inner(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
-    let html = client
-        .get(url.clone())
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+async fn get_html(client: &Client, url: &Url) -> Result<String, reqwest::Error> {
+    let action = || async {
+        client
+            .get(url.clone())
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await
+    };
+    let retry_strategy = ExponentialBackoff::from_millis(20).take(3);
+    let retry_condition =
+        |e: &reqwest::Error| !matches!(e.status(), Some(status) if !status.is_server_error());
 
-    let document = Html::parse_document(&html);
-
-    let gremien: Vec<_> = document
-        .select(&GREMIEN_SELECTOR)
-        .map(extract_text)
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let sammeldokument: Option<Url> = document
-        .select(&DOKUMENTE_SELECTOR)
-        .find(|el| el.text().next() == Some("Sammeldokument"))
-        .and_then(|el| el.attr("href"))
-        .and_then(|s| url.join(s).ok());
-
-    let has_to_link = document.select(&TO_LINK_SELECTOR).next().is_some();
-
-    Ok(WebsiteData {
-        art: document.select(&VOART_SELECTOR).next().map(extract_text),
-        verfasser: document
-            .select(&VOVERFASSER_SELECTOR)
-            .next()
-            .map(extract_text),
-        amt: document.select(&VOFAMT_SELECTOR).next().map(extract_text),
-        gremien,
-        sammeldokument,
-        has_to_link,
-    })
+    RetryIf::spawn(retry_strategy, action, retry_condition).await
 }
 
 async fn scrape_website(client: &Client, url: &str) -> (Option<Url>, Result<WebsiteData, Error>) {
     log::info!("Scraping website at {url}");
+
     let url = match Url::parse(url) {
         Ok(url) => url,
-        Err(e) => {
-            return (None, Err(e.into()));
-        }
+        Err(e) => return (None, Err(e.into())),
     };
-    let data = scrape_website_inner(client, &url).await;
-    (Some(url), data)
+
+    let html = match get_html(client, &url).await {
+        Ok(html) => html,
+        Err(e) => return (Some(url), Err(e.into())),
+    };
+
+    let document = Html::parse_document(&html);
+
+    let gremien: Vec<_> = select!(
+        document,
+        "#bfTable > table > tbody > tr > td:not(.date) + td:nth-of-type(3)"
+    )
+    .map(extract_text)
+    .filter(|s| !s.is_empty())
+    .collect();
+
+    let sammeldokument: Option<Url> = select!(document, "#dokumenteHeaderPanel a")
+        .find(|el| el.text().next() == Some("Sammeldokument"))
+        .and_then(|el| el.attr("href"))
+        .and_then(|s| url.join(s).ok());
+
+    let already_discussed = select!(document, "#bfTable .toLink a").next().is_some();
+
+    let data = WebsiteData {
+        art: select!(document, "#voart").map(extract_text).next(),
+        verfasser: select!(document, "#voverfasser1").map(extract_text).next(),
+        amt: select!(document, "#vofamt").map(extract_text).next(),
+        gremien,
+        sammeldokument,
+        already_discussed,
+    };
+
+    (Some(url), Ok(data))
 }
 
-async fn generate_notification(client: &Client, item: &Item) -> Option<(Message, Vec<String>)> {
+async fn generate_notification(client: &Client, item: &Item) -> Option<Message> {
     let title = TITLE_REGEX.captures(&item.description)?.get(1)?.as_str();
     let dsnr = item.title.strip_prefix("Vorlage ");
 
@@ -145,14 +169,18 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
         amt,
         gremien,
         sammeldokument,
-        has_to_link,
-    } = data
-        .inspect_err(|e| log::warn!("Couldn't scrape website: {e}"))
-        .unwrap_or_default();
+        already_discussed,
+    } = match data {
+        Ok(data) => data,
+        Err(e) => {
+            log::warn!("Couldn't scrape website: {e}");
+            WebsiteData::default()
+        }
+    };
 
-    if has_to_link {
+    #[cfg(not(feature = "feed_from_file"))]
+    if already_discussed {
         // was already discussed, probably old document, skipping
-        // TODO: Add this to known_items anyway
         log::info!("Skipping {dsnr:?} ({title}): was already discussed");
         return None;
     }
@@ -194,21 +222,19 @@ async fn generate_notification(client: &Client, item: &Item) -> Option<(Message,
     let button2 = sammeldokument.map(|url| InlineKeyboardButton::url("📄 PDF", url));
     let buttons = [button1, button2].into_iter().flatten().collect();
 
-    Some((
-        Message {
-            text: msg,
-            parse_mode: teloxide::types::ParseMode::Html,
-            buttons,
-        },
+    Some(Message {
+        text: msg,
+        parse_mode: teloxide::types::ParseMode::Html,
+        buttons,
         gremien,
-    ))
+    })
 }
-
-async fn do_update(feed_url: Url, db: &DatabaseClient) -> Result<(), Error> {
+async fn do_update(feed_url: Url, db: &redis::Client) -> Result<(), Error> {
     let feed_content = fetch_feed(feed_url).await?;
-    let http_client = reqwest::Client::new();
 
-    let chats = db.get_chats().await?;
+    let http_client = reqwest::Client::new();
+    let mut db_conn =
+        DatabaseConnection::connect(db.clone(), Some(Duration::from_secs(10))).await?;
 
     for item in &feed_content.item {
         let link = Url::parse(&item.link).ok();
@@ -224,21 +250,18 @@ async fn do_update(feed_url: Url, db: &DatabaseClient) -> Result<(), Error> {
             continue;
         };
 
-        // if this fails, it is ok to abort the whole operation. If redis is down, we will just try again on a later invocation.
-        if db.has_item(&volfdnr).await? {
+        // if db operations fail, it is ok to abort the whole operation (`?` operator).
+        // If redis is down, we'll just have to try again on a later invocation.
+
+        if db_conn.is_known_volfdnr(&volfdnr).await? {
             continue; // item already known
         }
 
-        let Some((msg, gremien)) = generate_notification(&http_client, item).await else {
-            continue;
-        };
-
-        let chats = chats
-            .iter()
-            .filter(|(_, gremium)| gremium.is_empty() || gremien.contains(gremium))
-            .map(|(chat_id, _)| *chat_id);
-
-        db.queue_messages(&volfdnr, &msg, chats).await?;
+        if let Some(message) = generate_notification(&http_client, item).await {
+            db_conn.schedule_broadcast(&volfdnr, &message).await?;
+        } else {
+            db_conn.add_known_volfdnr(&volfdnr).await?;
+        }
     }
 
     Ok(())
@@ -250,10 +273,12 @@ pub struct AllrisUrl {
 }
 
 impl AllrisUrl {
-    pub fn parse(s: &str) -> Result<Self, url::ParseError> {
-        let mut url = Url::parse(s)?;
-        if !url.path().ends_with("/") {
-            url.set_path(&format!("{}/", url.path()));
+    pub fn parse(input: &str) -> Result<Self, url::ParseError> {
+        let mut url = Url::parse(input)?;
+
+        let path = url.path();
+        if !path.ends_with("/") {
+            url.set_path(&format!("{path}/"));
         }
 
         Ok(Self { url })
@@ -264,22 +289,14 @@ impl AllrisUrl {
     }
 }
 
-async fn run(
-    allris_url: AllrisUrl,
-    update_interval: Duration,
-    db: DatabaseClient,
-    mut shutdown: oneshot::Receiver<()>,
-) {
+pub async fn scraper(allris_url: AllrisUrl, update_interval: Duration, db: redis::Client) {
     let feed_url = allris_url.feed_url();
 
     let mut interval = interval(update_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
     loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            _ = interval.tick() => ()
-        };
+        interval.tick().await;
 
         log::info!("Updating ...");
 
@@ -287,32 +304,5 @@ async fn run(
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
-    }
-}
-
-pub struct Scraper {
-    shutdown_tx: oneshot::Sender<()>,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl Scraper {
-    pub fn new(allris_url: AllrisUrl, update_interval: u64, db: DatabaseClient) -> Self {
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handle = tokio::spawn(run(
-            allris_url,
-            Duration::from_secs(update_interval),
-            db.clone(),
-            shutdown_rx,
-        ));
-
-        Self {
-            shutdown_tx,
-            handle,
-        }
-    }
-
-    pub async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(());
-        let _ = self.handle.await;
     }
 }
