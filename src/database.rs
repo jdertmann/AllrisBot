@@ -93,7 +93,7 @@ impl TryFrom<String> for ScheduledMessageKey {
     type Error = DatabaseError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::from_string(s).ok_or(DatabaseError::InvalidEntryError)
+        Self::from_string(s).ok_or(DatabaseError::InvalidEntry)
     }
 }
 
@@ -255,20 +255,20 @@ impl DatabaseClient {
 #[derive(Debug, Error)]
 pub enum DatabaseError {
     #[error("{0}")]
-    RedisError(#[from] redis::RedisError),
+    Redis(#[from] redis::RedisError),
     #[error("connection pool timed out")]
     PoolTimeout,
     #[error("deserialization failed: {0}")]
-    DeserializationError(#[from] serde_json::Error),
+    Deserialization(#[from] serde_json::Error),
     #[error("invalid entry in database")]
-    InvalidEntryError,
+    InvalidEntry,
 }
 
 impl From<bb8::RunError<redis::RedisError>> for DatabaseError {
     fn from(value: bb8::RunError<redis::RedisError>) -> Self {
         match value {
             bb8::RunError::TimedOut => Self::PoolTimeout,
-            bb8::RunError::User(e) => Self::RedisError(e),
+            bb8::RunError::User(e) => Self::Redis(e),
         }
     }
 }
