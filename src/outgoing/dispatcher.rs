@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
 use std::ops::DerefMut;
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
-use tokio::time::timeout_at;
+use tokio::time::{interval, timeout_at, MissedTickBehavior};
 use tokio_stream::{Stream, StreamExt};
 
 const GROUP_MESSAGES_PER_MINUTE: usize = 20;
@@ -47,7 +48,7 @@ pub struct RateLimiterPermit {
 impl RateLimiterPermit {
     pub fn sent(self) {
         let sleep = tokio::time::sleep(self.period);
-        let _ = tokio::spawn(async move {
+        tokio::spawn(async move {
             sleep.await;
             drop(self.permit)
         });
@@ -101,7 +102,7 @@ impl SlidingWindowRateLimiter {
 
 pub trait QueueEntry: Ord + Send + Sized + 'static {
     type Params: Send;
-    type Chat: Send + Copy + Hash + Eq;
+    type Chat: Send + Copy + Hash + Eq + Debug;
 
     fn is_reply(&self) -> bool;
 
@@ -113,6 +114,8 @@ pub trait QueueEntry: Ord + Send + Sized + 'static {
     ) -> impl Future<Output = Result<(), QueueEntryError<Self>>> + Send;
 
     fn delete(self, p: &Self::Params) -> impl Future<Output = ()> + Send;
+
+    fn get_all(p: &Self::Params) -> impl Future<Output = Vec<Self>> + Send;
 }
 
 pub enum QueueEntryError<Q: QueueEntry> {
@@ -150,6 +153,18 @@ impl<E: QueueEntry> Queue<E> {
     pub fn add_item(&self, item: E) {
         self.lock_queue().insert(item);
         self.element_added.notify_one();
+    }
+
+    pub fn add_items(&self, items: impl IntoIterator<Item = E>) -> usize {
+        let added_items;
+        {
+            let mut queue = self.lock_queue();
+            let old_size = queue.len();
+            queue.extend(items);
+            added_items = queue.len() - old_size;
+        }
+        self.element_added.notify_one();
+        added_items
     }
 
     pub async fn get_next_entry(&self, only_replies: bool) -> E {
@@ -350,11 +365,31 @@ enum DispatcherMsg<E: QueueEntry> {
     Enqueue(E),
     Shutdown { hard: bool },
     DropChatTask(E::Chat),
+    CheckOrphaned,
 }
 
 pub struct DispatcherTask<E: QueueEntry> {
     tx: mpsc::UnboundedSender<DispatcherMsg<E>>,
     handle: JoinHandle<()>,
+}
+
+struct DispatcherTaskInner<E: QueueEntry> {
+    params: E::Params,
+    limiter: SemaphoreRateLimiter,
+    tx: mpsc::UnboundedSender<DispatcherMsg<E>>,
+}
+
+impl<E: QueueEntry> DispatcherTaskInner<E>
+where
+    E::Params: Clone,
+{
+    fn create_chat(&self, chat: E::Chat) -> ChatTask<E> {
+        let tx = self.tx.clone();
+        let on_exit = move || {
+            let _ = tx.send(DispatcherMsg::DropChatTask(chat));
+        };
+        ChatTask::new(self.params.clone(), self.limiter.clone(), on_exit)
+    }
 }
 
 impl<E: QueueEntry> DispatcherTask<E>
@@ -367,12 +402,29 @@ where
         let tx2 = tx.clone();
 
         let handle = tokio::spawn(async move {
-            let limiter = SemaphoreRateLimiter::new(BROADCASTS_PER_SECOND, Duration::from_secs(1));
+            let inner = DispatcherTaskInner {
+                limiter: SemaphoreRateLimiter::new(BROADCASTS_PER_SECOND, Duration::from_secs(1)),
+                params,
+                tx: tx2,
+            };
 
             let mut tasks = HashMap::new();
+            let mut orphaned: HashMap<_, Vec<_>> = HashMap::new();
             let mut shutdown = false;
 
-            while let Some(msg) = rx.recv().await {
+            let mut check_orphaned_interval = interval(Duration::from_secs(120));
+            check_orphaned_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            loop {
+                let msg = tokio::select! {
+                    biased;
+                    _ = check_orphaned_interval.tick() => DispatcherMsg::CheckOrphaned,
+                    msg = rx.recv() => match msg {
+                        Some(msg) => msg,
+                        None => break
+                    },
+                };
+
                 match msg {
                     DispatcherMsg::Enqueue(e) => {
                         if shutdown {
@@ -380,15 +432,7 @@ where
                         }
 
                         let chat = e.get_chat();
-
-                        let task = tasks.entry(chat).or_insert_with(|| {
-                            let tx_clone = tx2.clone();
-                            let on_exit = move || {
-                                let _ = tx_clone.send(DispatcherMsg::DropChatTask(chat));
-                            };
-                            ChatTask::new(params.clone(), limiter.clone(), on_exit)
-                        });
-
+                        let task = tasks.entry(chat).or_insert_with(|| inner.create_chat(chat));
                         task.queue().add_item(e);
                     }
                     DispatcherMsg::DropChatTask(chat) => {
@@ -398,6 +442,34 @@ where
                         shutdown = true;
                         for task in tasks.values() {
                             task.shutdown(hard);
+                        }
+                    }
+                    DispatcherMsg::CheckOrphaned => {
+                        let keys = E::get_all(&inner.params).await;
+                        for key in keys {
+                            let key: E = key;
+                            let chat = key.get_chat();
+                            orphaned.entry(chat).or_default().push(key);
+                        }
+
+                        tasks.retain(|chat, task| {
+                            if task.tx.is_closed() {
+                                log::warn!("Task for chat {chat:#?} was found dead");
+                                return false;
+                            }
+
+                            if let Some(keys) = orphaned.remove(chat) {
+                                let added = task.queue().add_items(keys);
+                                log::info!("Found {added} orphaned messages for chat {chat:#?}");
+                            }
+
+                            true
+                        });
+
+                        for (chat, keys) in orphaned.drain() {
+                            let task = tasks.entry(chat).or_insert_with(|| inner.create_chat(chat));
+                            let added = task.queue().add_items(keys);
+                            log::info!("Found {added} orphaned messages for chat {chat:#?}");
                         }
                     }
                 }

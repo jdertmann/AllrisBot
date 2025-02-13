@@ -74,6 +74,16 @@ impl QueueEntry for ScheduledMessageKey {
     async fn delete(self, p: &Self::Params) {
         let _ = p.1.delete_message(&self).await;
     }
+
+    async fn get_all(p: &Self::Params) -> Vec<Self> {
+        match p.1.get_all_message_keys().await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to retrieve scheduled message from database: {e}");
+                vec![]
+            }
+        }
+    }
 }
 
 enum SendResult {

@@ -74,6 +74,27 @@ impl ScheduledMessageKey {
     pub fn chat_id(&self) -> ChatId {
         ChatId(self.nth(3))
     }
+
+    fn from_string(s: String) -> Option<Self> {
+        let mut split = s.split(':');
+        split.next()?.parse::<u8>().ok()?;
+        split.next()?.parse::<u64>().ok()?;
+        split.next()?;
+        split.next()?.parse::<i64>().ok()?;
+        if split.next().is_some() {
+            return None;
+        }
+
+        Some(Self(s))
+    }
+}
+
+impl TryFrom<String> for ScheduledMessageKey {
+    type Error = DatabaseError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_string(s).ok_or(DatabaseError::InvalidEntryError)
+    }
 }
 
 #[derive(Clone)]
@@ -212,6 +233,15 @@ impl DatabaseClient {
         Ok(msg)
     }
 
+    pub async fn get_all_message_keys(&self) -> Result<Vec<ScheduledMessageKey>, DatabaseError> {
+        let result: Vec<String> = self.client().await?.hkeys(SCHEDULED_MESSAGES_KEY).await?;
+        Ok(result
+            .into_iter()
+            .map(TryInto::try_into)
+            .filter_map(Result::ok)
+            .collect())
+    }
+
     pub async fn delete_message(&self, key: &ScheduledMessageKey) -> Result<bool, DatabaseError> {
         let removed = self
             .client()
@@ -230,6 +260,8 @@ pub enum DatabaseError {
     PoolTimeout,
     #[error("deserialization failed: {0}")]
     DeserializationError(#[from] serde_json::Error),
+    #[error("invalid entry in database")]
+    InvalidEntryError,
 }
 
 impl From<bb8::RunError<redis::RedisError>> for DatabaseError {
