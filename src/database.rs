@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bb8_redis::{bb8, RedisConnectionManager};
 use lazy_static::lazy_static;
@@ -9,7 +12,7 @@ use thiserror::Error;
 
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
-const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
+const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages_hash";
 
 lazy_static! {
     static ref MIGRATE_SCRIPT: redis::Script =
@@ -23,6 +26,75 @@ pub struct Message {
     pub text: String,
     pub parse_mode: teloxide::types::ParseMode,
     pub buttons: Vec<teloxide::types::InlineKeyboardButton>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
+pub struct ScheduledMessageKey(String);
+
+impl ScheduledMessageKey {
+    fn new(priority: u8, timestamp: u64, message_id: &str, chat_id: ChatId) -> Self {
+        let chat_id = chat_id.0;
+        assert!(!message_id.contains(":"));
+        Self(format!(
+            "{priority:03}:{timestamp:013}:{message_id}:{chat_id}"
+        ))
+    }
+
+    pub fn key(&self) -> &str {
+        &self.0
+    }
+
+    fn nth<T: FromStr>(&self, n: usize) -> T
+    where
+        T::Err: Debug,
+    {
+        self.0
+            .split(":")
+            .nth(n)
+            .expect("key invariant should be fulfilled")
+            .parse()
+            .expect("should be number")
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.nth(0)
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.nth(1)
+    }
+
+    pub fn message_id(&self) -> &str {
+        self.0
+            .split(":")
+            .nth(2)
+            .expect("key invariant should be fulfilled")
+    }
+
+    pub fn chat_id(&self) -> ChatId {
+        ChatId(self.nth(3))
+    }
+
+    fn from_string(s: String) -> Option<Self> {
+        let mut split = s.split(':');
+        split.next()?.parse::<u8>().ok()?;
+        split.next()?.parse::<u64>().ok()?;
+        split.next()?;
+        split.next()?.parse::<i64>().ok()?;
+        if split.next().is_some() {
+            return None;
+        }
+
+        Some(Self(s))
+    }
+}
+
+impl TryFrom<String> for ScheduledMessageKey {
+    type Error = DatabaseError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_string(s).ok_or(DatabaseError::InvalidEntry)
+    }
 }
 
 #[derive(Clone)]
@@ -97,77 +169,106 @@ impl DatabaseClient {
         Ok(result)
     }
 
+    pub async fn add_message(
+        &self,
+        key: &ScheduledMessageKey,
+        msg: &Message,
+    ) -> Result<(), DatabaseError> {
+        let msg = serde_json::to_string(&msg).unwrap();
+        self.client()
+            .await?
+            .hset(SCHEDULED_MESSAGES_KEY, key.key(), &msg)
+            .await?;
+        Ok(())
+    }
+
     pub async fn queue_messages(
         &self,
-        item: &str,
+        volfdnr: &str,
         msg: &Message,
         chats: impl Iterator<Item = ChatId>,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<Vec<ScheduledMessageKey>, DatabaseError> {
         let msg = serde_json::to_string(&msg).unwrap();
 
         let mut script = QUEUE_MESSAGES_SCRIPT.prepare_invoke();
 
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as u64;
+
         script
             .key(KNOWN_ITEMS_KEY)
             .key(SCHEDULED_MESSAGES_KEY)
-            .arg(item)
+            .arg(volfdnr)
             .arg(msg);
 
-        for ChatId(id) in chats {
-            script.arg(id);
+        let keys: Vec<_> = chats
+            .into_iter()
+            .map(|chat_id| ScheduledMessageKey::new(2, timestamp, volfdnr, chat_id))
+            .collect();
+
+        for key in &keys {
+            script.arg(&key.0);
         }
 
         let result = script.invoke_async(&mut *self.client().await?).await?;
 
-        Ok(result)
+        if result {
+            Ok(keys)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
-    pub async fn pop_message(
-        &self,
-        timeout: f64,
-    ) -> Result<Option<(ChatId, Message)>, DatabaseError> {
-        let response: Option<((), String)> = self
-            .client()
-            .await?
-            .brpop(SCHEDULED_MESSAGES_KEY, timeout)
+    pub async fn pop_message(&self, key: &ScheduledMessageKey) -> Result<Message, DatabaseError> {
+        let (msg, _): (String, ()) = redis::pipe()
+            .atomic()
+            .hget(SCHEDULED_MESSAGES_KEY, key.key())
+            .hdel(SCHEDULED_MESSAGES_KEY, key.key())
+            .query_async(&mut *self.client().await?)
             .await?;
 
-        let msg = match response {
-            Some(((), msg)) => msg,
-            None => {
-                return Ok(None);
-            }
-        };
+        let msg = serde_json::from_str(&msg)?;
+        Ok(msg)
+    }
 
-        let (chat_id, msg) = msg
-            .split_once(':')
-            .ok_or(DatabaseError::InvalidEntryError)?;
-        let msg = serde_json::from_str(msg)?;
-        let chat_id = chat_id
-            .parse()
-            .map_err(|_| DatabaseError::InvalidEntryError)?;
+    pub async fn get_all_message_keys(&self) -> Result<Vec<ScheduledMessageKey>, DatabaseError> {
+        let result: Vec<String> = self.client().await?.hkeys(SCHEDULED_MESSAGES_KEY).await?;
+        Ok(result
+            .into_iter()
+            .map(TryInto::try_into)
+            .filter_map(Result::ok)
+            .collect())
+    }
 
-        Ok(Some((ChatId(chat_id), msg)))
+    pub async fn delete_message(&self, key: &ScheduledMessageKey) -> Result<bool, DatabaseError> {
+        let removed = self
+            .client()
+            .await?
+            .hdel(SCHEDULED_MESSAGES_KEY, key.key())
+            .await?;
+        Ok(removed)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
     #[error("{0}")]
-    RedisError(#[from] redis::RedisError),
+    Redis(#[from] redis::RedisError),
     #[error("connection pool timed out")]
     PoolTimeout,
     #[error("deserialization failed: {0}")]
-    DeserializationError(#[from] serde_json::Error),
-    #[error("invalid entry")]
-    InvalidEntryError,
+    Deserialization(#[from] serde_json::Error),
+    #[error("invalid entry in database")]
+    InvalidEntry,
 }
 
 impl From<bb8::RunError<redis::RedisError>> for DatabaseError {
     fn from(value: bb8::RunError<redis::RedisError>) -> Self {
         match value {
             bb8::RunError::TimedOut => Self::PoolTimeout,
-            bb8::RunError::User(e) => Self::RedisError(e),
+            bb8::RunError::User(e) => Self::Redis(e),
         }
     }
 }

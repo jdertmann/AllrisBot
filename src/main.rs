@@ -1,14 +1,15 @@
 mod allris_scraper;
 mod bot_commands;
 mod database;
-mod message_sender;
+mod outgoing;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
-use database::DatabaseClient;
 
 use crate::allris_scraper::AllrisUrl;
+use crate::database::DatabaseClient;
 
 type Bot = teloxide::Bot;
 
@@ -77,18 +78,35 @@ async fn main() -> ExitCode {
         bot_commands::DispatcherTask::new(bot.clone(), db.clone())
     };
 
-    let scraper = allris_scraper::Scraper::new(args.allris_url, args.update_interval, db.clone());
-    let sender = message_sender::MessageSender::new(bot, db);
+    let mut message_dispatcher = outgoing::DispatcherTask::new((bot.clone(), db.clone()));
 
-    match tokio::signal::ctrl_c().await {
-        Ok(_) => (),
-        Err(e) => log::error!("Unable to listen for shutdown signal: {e}"),
-    }
+    let scraper = allris_scraper::Scraper::new(
+        args.allris_url,
+        args.update_interval,
+        db.clone(),
+        message_dispatcher.sender(),
+    );
+
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Unable to listen for shutdown signal");
 
     log::info!("Shutting down ...");
     let _ = tokio::join!(dispatcher.shutdown(), scraper.shutdown());
 
-    sender.shutdown().await;
+    message_dispatcher.shutdown(false);
+
+    let timed_out = tokio::select! {
+        _ = message_dispatcher.join_handle() => false,
+        _ = tokio::signal::ctrl_c() => true,
+        _ = tokio::time::sleep(Duration::from_secs(20)) => true
+    };
+
+    if timed_out {
+        log::warn!("Not all pending messages have been sent, shutting down anyway ...");
+        message_dispatcher.shutdown(true);
+        let _ = message_dispatcher.join_handle().await;
+    }
 
     ExitCode::SUCCESS
 }

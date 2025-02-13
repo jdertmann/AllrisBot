@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-stream = "0.3.6"
 bb8-redis = "0.20.0"
+clap = { version = "4.5.27", features = ["derive", "env"] }
 env_logger = "0.11"
 lazy_static = "1.5"
 log = "0.4"
@@ -18,5 +20,5 @@ serde-xml-rs = "0.6"
 teloxide = { version = "0.13", features = ["macros", "throttle"] }
 thiserror = "2"
 tokio = { version = "1.39", features = ["rt", "macros", "rt-multi-thread", "sync"] }
+tokio-stream = "0.1.17"
 url = "2.5"
-clap = { version = "4.5.27", features = ["derive", "env"] }
