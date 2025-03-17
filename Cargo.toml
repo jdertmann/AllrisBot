@@ -19,4 +19,4 @@ teloxide = { version = "0.13", features = ["macros", "throttle"] }
 thiserror = "2"
 tokio = { version = "1.39", features = ["rt", "macros", "rt-multi-thread", "sync"] }
 url = "2.5"
-clap = { version = "4.5.27", features = ["derive", "env"] }
+clap = { version = "4.5.32", features = ["derive", "env"] }
