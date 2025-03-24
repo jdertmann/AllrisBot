@@ -8,7 +8,7 @@ bb8-redis = "0.20.0"
 env_logger = "0.11"
 lazy_static = "1.5"
 log = "0.4"
-redis = { version = "0.28", default-features = false, features = ["keep-alive", "tokio-comp", "connection-manager", "script"] }
+redis = { version = "0.29", default-features = false, features = ["keep-alive", "tokio-comp", "connection-manager", "script"] }
 regex = "1"
 reqwest = "0.12"
 scraper = { version = "0.22", default-features = false }
