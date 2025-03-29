@@ -15,8 +15,8 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, interval, sleep, sleep_
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use self::lru_cache::{Cache, CacheItem};
-use crate::allris_scraper::Message;
 use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnection, StreamId};
+use crate::types::{ChatId, Message};
 
 const ADDITIONAL_ERRORS: &[&str] = &[
     "Forbidden: bot was kicked from the channel chat",
@@ -30,8 +30,6 @@ const CHAT_MESSAGES_PER_SECOND: f32 = 1.;
 
 const PARALLEL_SENDS: usize = 3;
 const DELAY_AFTER_SEND: f32 = PARALLEL_SENDS as f32 / BROADCASTS_PER_SECOND;
-
-pub type ChatId = i64;
 
 fn chat_rate_limit(is_group: bool) -> Interval {
     let interval = if is_group {

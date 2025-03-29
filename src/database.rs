@@ -1,18 +1,20 @@
 use std::fmt::{self, Debug};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use futures_util::lock::Mutex;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisError, RedisWrite, RetryMethod};
 use tokio::time::{Instant, sleep_until};
 
-use crate::allris_scraper::Message;
+use crate::types::Message;
 
 // define keys
 
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
+const LAST_UPDATE_KEY: &str = "allrisbot:last_update";
 
 fn registered_chat_key(chat_id: i64) -> String {
     format!("allrisbot:registered_chats:{chat_id}")
@@ -90,7 +92,7 @@ impl redis::ToRedisArgs for StreamId {
     }
 }
 
-impl FromRedisValue for crate::allris_scraper::Message {
+impl FromRedisValue for Message {
     fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
         let mut iter = match v.as_map_iter() {
             Some(iter) => iter,
@@ -453,6 +455,22 @@ implement_with_retry! {
             .into_iter()
             .next()
             .and_then(|(_, v)| v.into_iter().next())
+    }
+
+    pub async fn get_last_update(connection) -> Option<DateTime<Utc>> {
+        if let Some(timestamp) = connection.get(LAST_UPDATE_KEY).await? {
+            match DateTime::from_timestamp_millis(timestamp) {
+                Some(d) => Some(d),
+                None => invalid_type_error!(timestamp, "timestamp out of range")
+            }
+
+        } else {
+            None
+        }
+    }
+
+    pub async fn set_last_update(connection, timestamp: DateTime<Utc>) {
+        connection.set(LAST_UPDATE_KEY, timestamp.timestamp_millis()).await?
     }
 
     pub async fn get_chat_state(

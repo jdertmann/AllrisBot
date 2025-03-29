@@ -1,7 +1,8 @@
-mod allris_scraper;
+mod allris;
 mod bot_commands;
-pub mod broadcasting;
+mod broadcasting;
 mod database;
+mod types;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -12,7 +13,7 @@ use database::{DatabaseConnection, SharedDatabaseConnection};
 use redis::{ConnectionInfo, IntoConnectionInfo};
 use tokio::sync::mpsc;
 
-use crate::allris_scraper::AllrisUrl;
+use crate::allris::AllrisUrl;
 
 type Bot = teloxide::Bot;
 
@@ -83,7 +84,7 @@ async fn main() -> ExitCode {
         )
     };
 
-    let scraper = allris_scraper::scraper(
+    let scraper = allris::scraper(
         args.allris_url,
         Duration::from_secs(args.update_interval),
         db_client.clone(),
