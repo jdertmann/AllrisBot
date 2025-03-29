@@ -514,7 +514,7 @@ implement_with_retry! {
             update(&mut filters);
 
             let value: redis::Value = if filters.is_empty() {
-                if !current_filters.is_none() {
+                if current_filters.is_some() {
                     redis::pipe()
                         .atomic()
                         .add_command(Cmd::srem(REGISTERED_CHATS_KEY, chat_id))

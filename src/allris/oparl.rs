@@ -1,15 +1,25 @@
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Days, NaiveDate, SecondsFormat, Utc};
+use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{AllrisUrl, Error};
+use crate::allris::http_request;
 
+/*
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Consultation {
     pub role: String,
     pub authoritative: bool,
     pub organization: Vec<String>,
+}
+*/
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct File {
+    pub access_url: Url,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -18,11 +28,12 @@ pub struct Paper {
     pub id: Url,
     pub name: Option<String>,
     pub reference: Option<String>,
+    pub main_file: Option<File>,
     pub date: Option<NaiveDate>,
     pub paper_type: Option<String>,
     pub web: Option<Url>,
-    #[serde(default)]
-    pub consultation: Vec<Consultation>,
+    // #[serde(default)]
+    // pub consultation: Vec<Consultation>,
     pub deleted: bool,
 }
 
@@ -44,6 +55,9 @@ pub async fn get_update(
     since: DateTime<Utc>,
 ) -> Result<Vec<Paper>, Error> {
     let timestamp = since.to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    // there are sometimes old papers included. we don't want them
+    let oldest_date = (since - Days::new(3)).date_naive();
     let mut url = url.url.join("oparl/papers")?;
     url.query_pairs_mut()
         .append_pair("modified_since", &timestamp)
@@ -54,14 +68,13 @@ pub async fn get_update(
 
     while let Some(url) = next_url {
         log::info!("Retrieving {url} ...");
-        let content: Papers = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        papers.extend(content.data.into_iter().filter(|paper| !paper.deleted));
+        let content: Papers = http_request(client, &url, Response::json).await?;
+        papers.extend(
+            content
+                .data
+                .into_iter()
+                .filter(|paper| !paper.deleted && paper.date >= Some(oldest_date)),
+        );
         next_url = content.links.next;
     }
 

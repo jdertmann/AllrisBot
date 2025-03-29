@@ -169,10 +169,7 @@ async fn receive_negation(
     (previous_conditions, tag): (Vec<Condition>, Tag),
     msg: Message,
 ) -> HandlerResult {
-    let negation = matches!(
-        msg.text().as_deref(),
-        Some("Wenn das Pattern nicht zutrifft")
-    );
+    let negation = matches!(msg.text(), Some("Wenn das Pattern nicht zutrifft"));
     dialogue
         .update(State::ReceivingPattern {
             previous_conditions,
@@ -180,7 +177,7 @@ async fn receive_negation(
             negation,
         })
         .await?;
-    bot.send_message(msg.chat.id, format!("Gib nun ein Regex-Pattern ein."))
+    bot.send_message(msg.chat.id, "Gib nun ein Regex-Pattern ein.")
         .await?;
     Ok(())
 }
@@ -195,7 +192,7 @@ async fn receive_pattern(
         match Regex::new(pattern) {
             Ok(regex) => {
                 previous_conditions.push(Condition {
-                    tag: tag.clone(),
+                    tag,
                     pattern: regex,
                     negate,
                 });
