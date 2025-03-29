@@ -19,7 +19,6 @@ use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnect
 use crate::types::{ChatId, Condition, Filter, Message};
 
 const ADDITIONAL_ERRORS: &[&str] = &[
-    "Forbidden: bot was kicked from the channel chat",
     "Forbidden: bot was kicked from the group chat",
     "Bad Request: not enough rights to send text messages to the chat",
 ];
@@ -602,7 +601,7 @@ fn is_chat_invalid(e: &teloxide::ApiError) -> bool {
     }
 }
 
-// As soon as this fails, the error handling in `send_message` must be adapted
+// As soon as this fails, `ADDITIONAL_ERRORS` must be adapted
 #[test]
 fn test_api_error_not_yet_added() {
     use teloxide::ApiError;
