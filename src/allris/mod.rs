@@ -95,7 +95,6 @@ async fn generate_notification(client: &Client, item: &Paper) -> Option<Message>
         ..
     } = data;
 
-    #[cfg(not(feature = "feed_from_file"))]
     if already_discussed {
         // was already discussed, probably old document, skipping
         log::info!("Skipping {dsnr:?} ({title}): was already discussed");
