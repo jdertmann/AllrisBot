@@ -6,6 +6,7 @@ use std::pin::pin;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use lru_cache::Lru;
 use teloxide::RequestError;
 use teloxide::payloads::SendMessageSetters as _;
 use teloxide::prelude::Requester as _;
@@ -48,7 +49,7 @@ struct SharedResources {
     db: SharedDatabaseConnection,
     semaphore: Semaphore,
     hard_shutdown: tokio::sync::RwLock<bool>,
-    next_message_cache: Cache<StreamId, (StreamId, Message)>,
+    next_message_cache: Cache<StreamId, (StreamId, Message), Lru<StreamId>>,
 }
 
 impl Condition {
@@ -532,7 +533,7 @@ pub async fn broadcast_task(
         db: SharedDatabaseConnection::new(conn),
         semaphore: Semaphore::new(PARALLEL_SENDS),
         hard_shutdown: RwLock::new(false),
-        next_message_cache: Cache::new(15),
+        next_message_cache: Cache::new(Lru::new(15)),
     };
 
     let mut soft_shutdown = false;
