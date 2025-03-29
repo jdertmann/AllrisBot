@@ -34,29 +34,34 @@ struct Args {
     #[arg(short, long, value_parser = AllrisUrl::parse, default_value = "https://www.bonn.sitzung-online.de/")]
     allris_url: AllrisUrl,
 
-    /// Update interval in seconds
+    /// update interval in seconds
     #[arg(short, long, default_value_t = 900)]
     update_interval: u64,
 
-    /// Ignore incoming messages
+    /// ignore incoming messages
     #[arg(long)]
     ignore_messages: bool,
 
-    /// Generates an admin token, which will be valid for 10 minutes from startup
+    /// generate an admin token, which will be valid for 10 minutes from startup
     #[arg(long, conflicts_with = "ignore_messages")]
     generate_admin_token: bool,
 
-    /// Increase verbosity
-    #[arg(short, action = clap::ArgAction::Count)]
+    /// increase verbosity
+    #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// suppress all output
+    #[arg(short, long, conflicts_with = "verbose")]
+    quiet: bool,
 }
 
 fn init_logging(args: &Args) {
-    let log_level = match args.verbose {
-        0 => log::LevelFilter::Error,
-        1 => log::LevelFilter::Warn,
-        2 => log::LevelFilter::Info,
-        3 => log::LevelFilter::Debug,
+    let log_level = match (args.quiet, args.verbose) {
+        (true, _) => log::LevelFilter::Off,
+        (_, 0) => log::LevelFilter::Error,
+        (_, 1) => log::LevelFilter::Warn,
+        (_, 2) => log::LevelFilter::Info,
+        (_, 3) => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
 
