@@ -120,6 +120,7 @@ struct ChatWorker<'a> {
 enum WorkerResult {
     Ok,
     Stopped,
+    TokenInvalid,
     MigratedTo(ChatId),
 }
 
@@ -267,7 +268,7 @@ impl<'a> ChatWorker<'a> {
             }
             Err(RequestError::Api(teloxide::ApiError::InvalidToken)) => {
                 // token revoked?
-                ControlFlow::Break(todo!())
+                ControlFlow::Break(WorkerResult::TokenInvalid)
             }
             Err(RequestError::MigrateToChatId(new_chat_id)) => {
                 acknowledged.unacknowledge(self).await?;
@@ -467,7 +468,7 @@ impl<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> BroadcastTaskContext<'a, Fut, F> {
     fn handle_worker_finished(
         &mut self,
         (mut worker, result): (ChatWorker<'a>, database::Result<WorkerResult>),
-    ) {
+    ) -> Result<(), ()> {
         let send_next = match result {
             Ok(WorkerResult::Ok) => true,
             Ok(WorkerResult::Stopped) => match self.worker_states.get(&worker.chat_id) {
@@ -478,6 +479,7 @@ impl<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> BroadcastTaskContext<'a, Fut, F> {
                 self.trigger_chat(new_id);
                 false
             }
+            Ok(WorkerResult::TokenInvalid) => return Err(()),
             Err(e) => {
                 log::error!("Database error: {e}");
                 worker.last_processed = None;
@@ -490,6 +492,8 @@ impl<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> BroadcastTaskContext<'a, Fut, F> {
         } else {
             self.set_idle(worker);
         }
+
+        Ok(())
     }
 
     fn next_message_ready(
@@ -570,7 +574,10 @@ pub async fn broadcast_task(
                 next_message_ready.set(cx.next_message_ready(conn, was_error));
             },
             Some(result) = cx.running_workers.next(), if !cx.running_workers.is_empty() => {
-                cx.handle_worker_finished(result)
+                if cx.handle_worker_finished(result).is_err() {
+                    log::error!("Bot token invalid, aborting!");
+                    return
+                }
             }
             _ = cleanup_timer.tick() => cx.cleanup(),
         }
