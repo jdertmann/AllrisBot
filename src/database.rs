@@ -15,6 +15,7 @@ const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
 const LAST_UPDATE_KEY: &str = "allrisbot:last_update";
+const ADMIN_KEY: &str = "allrisbot:admin";
 
 fn registered_chat_key(chat_id: i64) -> String {
     format!("allrisbot:registered_chats:{chat_id}")
@@ -488,6 +489,15 @@ implement_with_retry! {
         } else {
             None
         }
+    }
+
+    pub async fn set_admin(connection, chat_id: i64) {
+        connection.set(ADMIN_KEY, chat_id).await?
+    }
+
+    pub async fn is_admin(connection, chat_id: i64) -> bool {
+        let admin: Option<i64> = connection.get(ADMIN_KEY).await?;
+        admin == Some(chat_id)
     }
 
     pub async fn set_last_update(connection, timestamp: DateTime<Utc>) {

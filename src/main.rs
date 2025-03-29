@@ -1,3 +1,4 @@
+mod admin;
 mod allris;
 mod bot_commands;
 mod broadcasting;
@@ -7,6 +8,7 @@ mod types;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use admin::AdminToken;
 use broadcasting::broadcast_task;
 use clap::Parser;
 use redis::{ConnectionInfo, IntoConnectionInfo};
@@ -20,17 +22,13 @@ type Bot = teloxide::Bot;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// URL of the Redis instance
-    #[arg(short, long, env = "REDIS_URL", value_parser = |s: &str| s.into_connection_info(), default_value = "redis://127.0.0.1")]
-    redis_url: ConnectionInfo,
-
     /// Telegram bot token
     #[arg(short = 't', long = "token", env = "BOT_TOKEN")]
     bot_token: String,
 
-    /// Ignore incoming messages
-    #[arg(short, long)]
-    ignore_messages: bool,
+    /// URL of the Redis instance
+    #[arg(short, long, env = "REDIS_URL", value_parser = |s: &str| s.into_connection_info(), default_value = "redis://127.0.0.1")]
+    redis_url: ConnectionInfo,
 
     /// URL of the Allris 4 instance
     #[arg(short, long, value_parser = AllrisUrl::parse, default_value = "https://www.bonn.sitzung-online.de/")]
@@ -39,6 +37,14 @@ struct Args {
     /// Update interval in seconds
     #[arg(short, long, default_value_t = 900)]
     update_interval: u64,
+
+    /// Ignore incoming messages
+    #[arg(long)]
+    ignore_messages: bool,
+
+    /// Generates an admin token, which will be valid for 10 minutes from startup
+    #[arg(long, conflicts_with = "ignore_messages")]
+    generate_admin_token: bool,
 
     /// Increase verbosity
     #[arg(short, action = clap::ArgAction::Count)]
@@ -71,10 +77,16 @@ async fn main() -> ExitCode {
     let db_client = redis::Client::open(args.redis_url).unwrap();
     let bot = teloxide::Bot::new(&args.bot_token);
 
+    let admin_token = args.generate_admin_token.then(|| {
+        let token = AdminToken::new();
+        println!("Admin token (valid for 10 minutes): {token}");
+        token
+    });
+
     let dispatcher = if args.ignore_messages {
         bot_commands::DispatcherTask::do_nothing()
     } else {
-        bot_commands::DispatcherTask::new(bot.clone(), db_client.clone())
+        bot_commands::DispatcherTask::new(bot.clone(), db_client.clone(), admin_token)
     };
 
     let scraper = allris::scraper(

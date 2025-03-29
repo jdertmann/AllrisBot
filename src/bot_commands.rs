@@ -8,8 +8,10 @@ use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::prelude::*;
 use teloxide::types::{KeyboardButton, KeyboardMarkup, ReplyMarkup};
 use teloxide::utils::command::BotCommands;
+use tokio::sync::Mutex;
 
 use crate::Bot;
+use crate::admin::AdminToken;
 use crate::database::{DatabaseConnection, SharedDatabaseConnection};
 use crate::types::{Condition, Filter, Tag};
 
@@ -29,6 +31,13 @@ enum Command {
     Stop,
     #[command(description = "zeige diesen Text.")]
     Help,
+    #[command(hide)]
+    Admin(String),
+}
+
+struct Context {
+    connection: SharedDatabaseConnection,
+    token: Option<Mutex<AdminToken>>,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -49,7 +58,7 @@ pub enum State {
     },
 }
 
-type MyDialogue = Dialogue<State, InMemStorage<State>>;
+type FilterDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 fn tag_keyboard() -> ReplyMarkup {
@@ -96,42 +105,63 @@ fn negation_keyboard() -> ReplyMarkup {
     })
 }
 
-async fn start(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
-    if matches!(
-        msg.text().map(|s| s.to_lowercase()).as_deref(),
-        Some("/addfilter")
-    ) {
-        dialogue
-            .update(State::ReceivingTag {
-                previous_conditions: vec![],
-            })
-            .await?;
-        bot
-        .send_message(msg.chat.id, "Lass uns einen Filter einrichten! Du kannst den Filter auch sofort speichern, um alle Vorlagen einzuschließen.\n\nBitte gib den ersten Tag ein:")
-    .reply_markup(tag_keyboard())
-    .await?;
+async fn handle_command(
+    bot: Bot,
+    dialogue: FilterDialogue,
+    msg: Message,
+    command: Command,
+    context: Arc<Context>,
+) -> HandlerResult {
+    match command {
+        Command::AddFilter => {
+            dialogue
+                .update(State::ReceivingTag {
+                    previous_conditions: vec![],
+                })
+                .await?;
+            let text = "Lass uns einen Filter einrichten! Du kannst den Filter auch sofort speichern, um alle Vorlagen einzuschließen.\n\nBitte gib den ersten Tag ein:";
+            bot.send_message(msg.chat.id, text)
+                .reply_markup(tag_keyboard())
+                .await?;
+        }
+        Command::ListFilters => todo!(),
+        Command::DeleteFilter => todo!(),
+        Command::Stop => todo!(),
+        Command::Help => {
+            let commands = Command::descriptions().to_string();
+            bot.send_message(msg.chat.id, commands).await?;
+        }
+        Command::Admin(token) => {
+            if let Some(t) = &context.token {
+                if t.lock().await.validate(&token) {
+                    context.connection.set_admin(msg.chat.id.0).await?;
+                    bot.send_message(msg.chat.id, "Ok").await?;
+                }
+            }
+        }
     }
+
     Ok(())
 }
 
 async fn receive_tag(
     bot: Bot,
-    db: redis::Client,
-    dialogue: MyDialogue,
+    context: Arc<Context>,
+    dialogue: FilterDialogue,
     (previous_conditions,): (Vec<Condition>,),
     msg: Message,
 ) -> HandlerResult {
     if let Some(tag_text) = msg.text() {
         let tag = match tag_text {
             "Speichern" => {
-                let mut conn =
-                    DatabaseConnection::connect(db, Some(Duration::from_secs(6))).await?;
-                conn.update_filter(msg.chat.id.0, &|filters| {
-                    filters.push(Filter {
-                        conditions: previous_conditions.clone(),
+                context
+                    .connection
+                    .update_filter(msg.chat.id.0, &|filters| {
+                        filters.push(Filter {
+                            conditions: previous_conditions.clone(),
+                        })
                     })
-                })
-                .await?;
+                    .await?;
                 bot.send_message(msg.chat.id, "Filter gespeichert!").await?;
                 dialogue.exit().await?;
                 return Ok(());
@@ -165,7 +195,7 @@ async fn receive_tag(
 
 async fn receive_negation(
     bot: Bot,
-    dialogue: MyDialogue,
+    dialogue: FilterDialogue,
     (previous_conditions, tag): (Vec<Condition>, Tag),
     msg: Message,
 ) -> HandlerResult {
@@ -184,7 +214,7 @@ async fn receive_negation(
 
 async fn receive_pattern(
     bot: Bot,
-    dialogue: MyDialogue,
+    dialogue: FilterDialogue,
     (mut previous_conditions, tag, negate): (Vec<Condition>, Tag, bool),
     msg: Message,
 ) -> HandlerResult {
@@ -225,15 +255,26 @@ async fn receive_pattern(
 
 fn create(
     bot: Bot,
-    db: redis::Client,
+    client: redis::Client,
+    admin_token: Option<AdminToken>,
 ) -> Dispatcher<Bot, Box<dyn std::error::Error + Send + Sync>, teloxide::dispatching::DefaultKey> {
-    let database = Arc::new(SharedDatabaseConnection::new(DatabaseConnection::new(
-        db.clone(),
+    let connection = SharedDatabaseConnection::new(DatabaseConnection::new(
+        client,
         Some(Duration::from_secs(6)),
-    )));
+    ));
+
+    let context = Arc::new(Context {
+        connection,
+        token: admin_token.map(Mutex::new),
+    });
+
     let handler = Update::filter_message()
         .enter_dialogue::<Message, InMemStorage<State>, State>()
-        .branch(dptree::case![State::Start].endpoint(start))
+        .branch(
+            dptree::case![State::Start]
+                .filter_command::<Command>()
+                .endpoint(handle_command),
+        )
         .branch(
             dptree::case![State::ReceivingNegation {
                 previous_conditions,
@@ -257,7 +298,7 @@ fn create(
         );
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![db, database, InMemStorage::<State>::new()])
+        .dependencies(dptree::deps![context, InMemStorage::<State>::new()])
         .error_handler(LoggingErrorHandler::with_custom_text(
             "An error has occurred in the dispatcher",
         ))
@@ -271,8 +312,8 @@ pub struct DispatcherTask {
 
 impl DispatcherTask {
     /// Creates a dispatcher to handle the bot's incoming messages.
-    pub fn new(bot: Bot, db: redis::Client) -> Self {
-        let mut dispatcher = create(bot, db);
+    pub fn new(bot: Bot, db: redis::Client, admin_token: Option<AdminToken>) -> Self {
+        let mut dispatcher = create(bot, db, admin_token);
         let token = dispatcher.shutdown_token();
         tokio::spawn(async move { dispatcher.dispatch().await });
 
