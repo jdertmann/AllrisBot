@@ -23,19 +23,38 @@ type Bot = teloxide::Bot;
 #[command(version, about, long_about = None)]
 struct Args {
     /// Telegram bot token
-    #[arg(short = 't', long = "token", env = "BOT_TOKEN")]
+    #[arg(
+        short = 't',
+        long = "token",
+        value_name = "TOKEN",
+        env = "BOT_TOKEN",
+        hide_env_values = true
+    )]
     bot_token: String,
 
     /// URL of the Redis instance
-    #[arg(short, long, env = "REDIS_URL", value_parser = |s: &str| s.into_connection_info(), default_value = "redis://127.0.0.1")]
+    #[arg(
+        short,
+        long,
+        value_name = "URL",
+        env = "REDIS_URL",
+        value_parser = |s: &str| s.into_connection_info(),
+        default_value = "redis://127.0.0.1"
+    )]
     redis_url: ConnectionInfo,
 
     /// URL of the Allris 4 instance
-    #[arg(short, long, value_parser = AllrisUrl::parse, default_value = "https://www.bonn.sitzung-online.de/")]
+    #[arg(
+        short,
+        long,
+        value_name = "URL",
+        value_parser = AllrisUrl::parse,
+        default_value = "https://www.bonn.sitzung-online.de/"
+    )]
     allris_url: AllrisUrl,
 
-    /// update interval in seconds
-    #[arg(short, long, default_value_t = 900)]
+    /// interval to check for new messages
+    #[arg(short, long, value_name = "SECONDS", default_value_t = 900)]
     update_interval: u64,
 
     /// ignore incoming messages
