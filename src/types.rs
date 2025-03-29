@@ -121,9 +121,9 @@ impl Display for Condition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} passt {} zu \"{}\"",
+            "{} passt {}zu \"{}\"",
             self.tag.label(),
-            if self.negate { "nicht" } else { "" },
+            if self.negate { "nicht " } else { "" },
             self.pattern.as_str()
         )
     }
@@ -136,8 +136,13 @@ pub struct Filter {
 
 impl Display for Filter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for condition in &self.conditions {
-            writeln!(f, "{condition}")?;
+        if self.conditions.is_empty() {
+            writeln!(f, "Alle Vorlagen")?;
+        } else {
+            for (i, condition) in self.conditions.iter().enumerate() {
+                let and = if i == 0 { "  " } else { "& " };
+                writeln!(f, "{and}{condition}")?;
+            }
         }
 
         Ok(())

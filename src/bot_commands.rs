@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use teloxide::dispatching::ShutdownToken;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::prelude::*;
-use teloxide::types::{KeyboardButton, KeyboardMarkup, ReplyMarkup};
+use teloxide::types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
 
@@ -25,18 +25,20 @@ enum Command {
     AddFilter,
     #[command(description = "bestehende Filterregeln anzeigen.")]
     ListFilters,
-    #[command(description = "Eine neue Filterregel hinzufügen.")]
+    #[command(description = "eine Filterregel löschen.")]
     DeleteFilter,
-    #[command(description = "Eine neue Filterregel hinzufügen.")]
-    Stop,
+    #[command(description = "alle Filterregeln löschen.")]
+    DeleteAllFilters,
     #[command(description = "zeige diesen Text.")]
     Help,
+    #[command(hide)]
+    Cancel,
     #[command(hide)]
     Admin(String),
 }
 
 struct Context {
-    connection: SharedDatabaseConnection,
+    database: SharedDatabaseConnection,
     token: Option<Mutex<AdminToken>>,
 }
 
@@ -56,10 +58,11 @@ pub enum State {
         tag: Tag,
         negation: bool,
     },
+    DeletingFilter,
 }
 
 type FilterDialogue = Dialogue<State, InMemStorage<State>>;
-type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type HandlerResult = Result<(), HandlerError>;
 
 fn tag_keyboard() -> ReplyMarkup {
     let mut keyboard = vec![vec![KeyboardButton {
@@ -86,14 +89,8 @@ fn tag_keyboard() -> ReplyMarkup {
 
 fn negation_keyboard() -> ReplyMarkup {
     let keyboard = vec![
-        vec![KeyboardButton {
-            text: "Wenn das Pattern zutrifft".into(),
-            request: None,
-        }],
-        vec![KeyboardButton {
-            text: "Wenn das Pattern nicht zutrifft".into(),
-            request: None,
-        }],
+        vec![KeyboardButton::new("Wenn das Pattern zutrifft")],
+        vec![KeyboardButton::new("Wenn das Pattern nicht zutrifft")],
     ];
     ReplyMarkup::Keyboard(KeyboardMarkup {
         keyboard,
@@ -105,42 +102,256 @@ fn negation_keyboard() -> ReplyMarkup {
     })
 }
 
-async fn handle_command(
+async fn handle_message(
     bot: Bot,
+    me: Me,
+    storage: Arc<InMemStorage<State>>,
     dialogue: FilterDialogue,
+    state: State,
     msg: Message,
-    command: Command,
     context: Arc<Context>,
 ) -> HandlerResult {
-    match command {
-        Command::AddFilter => {
-            dialogue
-                .update(State::ReceivingTag {
-                    previous_conditions: vec![],
-                })
+    let bot2 = bot.clone();
+    let chat_id = msg.chat.id;
+
+    let result = async {
+        if let Some(new_chat_id) = msg.migrate_to_chat_id() {
+            let old_chat_id = msg.chat.id;
+            log::info!("Migrating chat {old_chat_id} to {new_chat_id}");
+            context
+                .database
+                .migrate_chat(old_chat_id.0, new_chat_id.0)
                 .await?;
-            let text = "Lass uns einen Filter einrichten! Du kannst den Filter auch sofort speichern, um alle Vorlagen einzuschließen.\n\nBitte gib den ersten Tag ein:";
-            bot.send_message(msg.chat.id, text)
-                .reply_markup(tag_keyboard())
+            FilterDialogue::new(storage, *new_chat_id)
+                .update(state)
                 .await?;
+            dialogue.exit().await?;
+            return Ok(());
         }
-        Command::ListFilters => todo!(),
-        Command::DeleteFilter => todo!(),
-        Command::Stop => todo!(),
-        Command::Help => {
-            let commands = Command::descriptions().to_string();
-            bot.send_message(msg.chat.id, commands).await?;
+
+        let command = msg
+            .text()
+            .and_then(|text| Command::parse(text, me.username()).ok());
+
+        if matches!(command, Some(Command::Cancel)) {
+            let message = if matches!(state, State::Start) {
+                "No command to cancel ..."
+            } else {
+                "Command was cancelled!"
+            };
+            dialogue.reset().await?;
+            bot.send_message(msg.chat.id, message).await?;
+            return Ok(());
         }
-        Command::Admin(token) => {
-            if let Some(t) = &context.token {
-                if t.lock().await.validate(&token) {
-                    context.connection.set_admin(msg.chat.id.0).await?;
-                    bot.send_message(msg.chat.id, "Ok").await?;
+
+        match state {
+            State::Start => {
+                if let Some(command) = command {
+                    handle_command(&bot, &dialogue, &msg, &command, &context).await?;
                 }
             }
+            State::ReceivingTag {
+                previous_conditions,
+            } => receive_tag(bot, context, dialogue, previous_conditions, msg).await?,
+            State::ReceivingNegation {
+                previous_conditions,
+                tag,
+            } => receive_negation(bot, dialogue, previous_conditions, tag, msg).await?,
+            State::ReceivingPattern {
+                previous_conditions,
+                tag,
+                negation,
+            } => receive_pattern(bot, dialogue, previous_conditions, tag, negation, msg).await?,
+            State::DeletingFilter => delete_filter(&bot, &dialogue, &msg, &context).await?,
+        };
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = result.as_ref() {
+        if !matches!(e, HandlerError::Bot(_)) {
+            bot2.send_message(chat_id, "Interner Fehler :((").await?;
         }
     }
 
+    result
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HandlerError {
+    #[error("Database error: {0}")]
+    Database(#[from] crate::database::Error),
+    #[error("Storage error: {0}")]
+    Storage(#[from] teloxide::dispatching::dialogue::InMemStorageError),
+    #[error("Bot error: {0}")]
+    Bot(#[from] teloxide::errors::RequestError),
+}
+
+async fn handle_command(
+    bot: &Bot,
+    dialogue: &FilterDialogue,
+    msg: &Message,
+    command: &Command,
+    context: &Context,
+) -> Result<(), HandlerError> {
+    match command {
+        Command::AddFilter => add_filter(bot, dialogue, msg).await?,
+        Command::ListFilters => list_filters(bot, msg, context).await?,
+        Command::DeleteFilter => start_delete_filter(bot, msg, context, dialogue).await?,
+        Command::DeleteAllFilters => delete_all_filters(bot, msg, context).await?,
+        Command::Help => help(bot, msg).await?,
+        Command::Admin(token) => admin(bot, msg, context, token).await?,
+        Command::Cancel => unreachable!(),
+    }
+
+    Ok(())
+}
+
+async fn delete_filter(
+    bot: &Bot,
+    dialogue: &FilterDialogue,
+    msg: &Message,
+    context: &Context,
+) -> HandlerResult {
+    dialogue.exit().await?;
+
+    let index = msg
+        .text()
+        .and_then(|text| text.strip_prefix("Filter "))
+        .and_then(|text| text.parse().ok())
+        .and_then(|x: usize| x.checked_sub(1));
+
+    let index = match index {
+        Some(x) => x,
+        _ => {
+            let message = "Ungültige Eingabe, Abbruch!";
+            bot.send_message(msg.chat.id, message).await?;
+            return Ok(());
+        }
+    };
+
+    let removed = context
+        .database
+        .update_filter(msg.chat.id.0, &|filters| {
+            let valid = index < filters.len();
+            filters.remove(index);
+            valid
+        })
+        .await?;
+
+    let message = if removed {
+        "Alles klar, Filter wurde entfernt!"
+    } else {
+        "Diesen Filter scheint es nicht zu geben :/"
+    };
+
+    bot.send_message(msg.chat.id, message).await?;
+
+    Ok(())
+}
+
+async fn list_filters(bot: &crate::Bot, msg: &Message, context: &Context) -> HandlerResult {
+    use std::fmt::Write;
+    let filters = context.database.get_filters(msg.chat.id.0).await?;
+    let mut response = String::new();
+
+    if filters.is_empty() {
+        response += "Zur Zeit sind keine Filter aktiv.";
+    } else {
+        response += "Zur Zeit sind folgende Filter aktiv:\n\n";
+        for (i, filter) in filters.iter().enumerate() {
+            writeln!(response, "Filter {}:\n{filter}", i + 1).unwrap();
+        }
+    }
+
+    bot.send_message(msg.chat.id, response).await?;
+
+    Ok(())
+}
+
+async fn start_delete_filter(
+    bot: &crate::Bot,
+    msg: &Message,
+    context: &Context,
+    dialogue: &FilterDialogue,
+) -> HandlerResult {
+    use std::fmt::Write;
+    let filters = context.database.get_filters(msg.chat.id.0).await?;
+    let mut response = String::new();
+
+    if filters.is_empty() {
+        response += "Zur Zeit sind keine Filter aktiv.";
+    } else {
+        dialogue.update(State::DeletingFilter).await?;
+
+        response += "Wähle einen der folgenden Filter zum Löschen:\n\n";
+        for (i, filter) in filters.iter().enumerate() {
+            writeln!(response, "Filter {}:\n{filter}", i + 1).unwrap();
+        }
+    }
+
+    let buttons: Vec<_> = (1..=filters.len())
+        .map(|i| KeyboardButton::new(format!("Filter {i}")))
+        .collect();
+    let keyboard: Vec<_> = buttons.chunks(3).map(Vec::from).collect();
+
+    bot.send_message(msg.chat.id, response)
+        .reply_markup(ReplyMarkup::Keyboard(KeyboardMarkup::new(keyboard).one_time_keyboard()))
+        .await?;
+
+    Ok(())
+}
+
+async fn add_filter(
+    bot: &crate::Bot,
+    dialogue: &Dialogue<State, InMemStorage<State>>,
+    msg: &Message,
+) -> Result<(), HandlerError> {
+    dialogue
+        .update(State::ReceivingTag {
+            previous_conditions: vec![],
+        })
+        .await?;
+    let text = "Lass uns einen Filter einrichten! Du kannst den Filter auch sofort speichern, um alle Vorlagen einzuschließen.\n\nBitte gib den ersten Tag ein:";
+    bot.send_message(msg.chat.id, text)
+        .reply_markup(tag_keyboard())
+        .await?;
+    Ok(())
+}
+
+async fn help(bot: &teloxide::Bot, msg: &Message) -> Result<(), HandlerError> {
+    let help_message = Command::descriptions().to_string();
+    bot.send_message(msg.chat.id, help_message).await?;
+    Ok(())
+}
+
+async fn admin(
+    bot: &teloxide::Bot,
+    msg: &Message,
+    context: &Context,
+    token: &str,
+) -> Result<(), HandlerError> {
+    Ok(if let Some(t) = &context.token {
+        if t.lock().await.validate(token) && msg.chat.is_private() {
+            context.database.set_admin(msg.chat.id.0).await?;
+            bot.send_message(msg.chat.id, "Ok").await?;
+        }
+    })
+}
+
+async fn delete_all_filters(
+    bot: &teloxide::Bot,
+    msg: &Message,
+    context: &Context,
+) -> Result<(), HandlerError> {
+    let removed = context.database.remove_subscription(msg.chat.id.0).await?;
+    let message = if removed {
+        "Deine Filter wurden entfernt."
+    } else {
+        "Es waren keine Filter aktiv."
+    };
+    bot.send_message(msg.chat.id, message).await?;
     Ok(())
 }
 
@@ -148,14 +359,14 @@ async fn receive_tag(
     bot: Bot,
     context: Arc<Context>,
     dialogue: FilterDialogue,
-    (previous_conditions,): (Vec<Condition>,),
+    previous_conditions: Vec<Condition>,
     msg: Message,
 ) -> HandlerResult {
     if let Some(tag_text) = msg.text() {
         let tag = match tag_text {
             "Speichern" => {
                 context
-                    .connection
+                    .database
                     .update_filter(msg.chat.id.0, &|filters| {
                         filters.push(Filter {
                             conditions: previous_conditions.clone(),
@@ -196,7 +407,8 @@ async fn receive_tag(
 async fn receive_negation(
     bot: Bot,
     dialogue: FilterDialogue,
-    (previous_conditions, tag): (Vec<Condition>, Tag),
+    previous_conditions: Vec<Condition>,
+    tag: Tag,
     msg: Message,
 ) -> HandlerResult {
     let negation = matches!(msg.text(), Some("Wenn das Pattern nicht zutrifft"));
@@ -215,7 +427,10 @@ async fn receive_negation(
 async fn receive_pattern(
     bot: Bot,
     dialogue: FilterDialogue,
-    (mut previous_conditions, tag, negate): (Vec<Condition>, Tag, bool),
+
+    mut previous_conditions: Vec<Condition>,
+    tag: Tag,
+    negate: bool,
     msg: Message,
 ) -> HandlerResult {
     if let Some(pattern) = msg.text() {
@@ -257,52 +472,26 @@ fn create(
     bot: Bot,
     client: redis::Client,
     admin_token: Option<AdminToken>,
-) -> Dispatcher<Bot, Box<dyn std::error::Error + Send + Sync>, teloxide::dispatching::DefaultKey> {
+) -> Dispatcher<Bot, HandlerError, teloxide::dispatching::DefaultKey> {
     let connection = SharedDatabaseConnection::new(DatabaseConnection::new(
         client,
         Some(Duration::from_secs(6)),
     ));
 
     let context = Arc::new(Context {
-        connection,
+        database: connection,
         token: admin_token.map(Mutex::new),
     });
 
     let handler = Update::filter_message()
         .enter_dialogue::<Message, InMemStorage<State>, State>()
-        .branch(
-            dptree::case![State::Start]
-                .filter_command::<Command>()
-                .endpoint(handle_command),
-        )
-        .branch(
-            dptree::case![State::ReceivingNegation {
-                previous_conditions,
-                tag
-            }]
-            .endpoint(receive_negation),
-        )
-        .branch(
-            dptree::case![State::ReceivingPattern {
-                previous_conditions,
-                tag,
-                negation
-            }]
-            .endpoint(receive_pattern),
-        )
-        .branch(
-            dptree::case![State::ReceivingTag {
-                previous_conditions,
-            }]
-            .endpoint(receive_tag),
-        );
+        .endpoint(handle_message);
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![context, InMemStorage::<State>::new()])
-        .error_handler(LoggingErrorHandler::with_custom_text(
-            "An error has occurred in the dispatcher",
-        ))
-        .default_handler(|_| async {})
+        .default_handler(|update| async move {
+            log::info!("Missed update: {:?}", update.kind);
+        })
         .build()
 }
 

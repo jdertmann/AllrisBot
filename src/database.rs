@@ -227,7 +227,7 @@ macro_rules! implement_with_retry {
         $conn_struct_shared: ident;
         $(
             $(#[$attr:ident])?
-            $vis:vis async fn $fn_name:ident
+            $vis:vis async fn $fn_name:ident $(<$t:ident>)?
             (
                 $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
             ) $(-> $return_type:ty)?
@@ -239,7 +239,7 @@ macro_rules! implement_with_retry {
             use super::*;
 
             $(
-                pub(super) async fn $fn_name(conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
+                pub(super) async fn $fn_name $( <$t>)? (conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
                     let request = async {
                         let $conn = conn.get_connection().await?;
                         Ok($body)
@@ -264,7 +264,7 @@ macro_rules! implement_with_retry {
         impl $conn_struct {
         $(
             #[allow(dead_code)]
-            $vis async fn $fn_name (
+            $vis async fn $fn_name $(< $t >)?  (
                 &mut self,
                 $($param_name: $param_type),*
             ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
@@ -281,7 +281,7 @@ macro_rules! implement_with_retry {
         impl $conn_struct_shared {
             $(
                 #[allow(dead_code)]
-                $vis async fn $fn_name (
+                $vis async fn $fn_name $(< $t >)?  (
                     &self,
                     $($param_name: $param_type),*
                 ) -> Result<implement_with_retry!(@ret $($return_type)?)>  {
@@ -505,7 +505,7 @@ implement_with_retry! {
     }
 
     #[reset_connection_on_error]
-    pub async fn update_filter(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>)) {
+    pub async fn update_filter<T>(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>) -> T) -> T {
         let key = registered_chat_key(chat_id);
         let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
 
@@ -521,7 +521,7 @@ implement_with_retry! {
                 None => vec![]
             };
 
-            update(&mut filters);
+            let result = update(&mut filters);
 
             let value: redis::Value = if filters.is_empty() {
                 if current_filters.is_some() {
@@ -533,7 +533,7 @@ implement_with_retry! {
                         .await?
                 } else {
                     // nothing has changed
-                    break
+                    break result
                 }
             } else {
                 let filter_str = serde_json::to_string(&filters).map_err(RedisError::from)?;
@@ -549,7 +549,7 @@ implement_with_retry! {
             };
 
             if !matches!(value, redis::Value::Nil) {
-                break
+                break result
             }
         }
     }
