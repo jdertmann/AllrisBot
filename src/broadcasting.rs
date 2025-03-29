@@ -16,7 +16,7 @@ use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use self::lru_cache::{Cache, CacheItem};
 use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnection, StreamId};
-use crate::types::{ChatId, Message};
+use crate::types::{ChatId, Condition, Filter, Message};
 
 const ADDITIONAL_ERRORS: &[&str] = &[
     "Forbidden: bot was kicked from the channel chat",
@@ -44,11 +44,6 @@ fn chat_rate_limit(is_group: bool) -> Interval {
     interval
 }
 
-/*
-TODOS:
-- add filtering
-*/
-
 struct SharedResources {
     bot: crate::Bot,
     db: SharedDatabaseConnection,
@@ -57,11 +52,69 @@ struct SharedResources {
     next_message_cache: Cache<StreamId, (StreamId, Message)>,
 }
 
+impl Condition {
+    fn matches(&self, message: &Message) -> bool {
+        message
+            .tags
+            .iter()
+            .filter(|x| x.0 == self.tag)
+            .any(|x| self.pattern.is_match(&x.1))
+            ^ self.negate
+    }
+}
+
+impl Filter {
+    fn matches(&self, message: &Message) -> bool {
+        self.conditions
+            .iter()
+            .all(|condition| condition.matches(message))
+    }
+}
+#[test]
+fn serialize() {
+    use crate::types::Tag;
+
+    let filter = serde_json::to_string_pretty(&vec![
+        Filter {
+            conditions: vec![
+                Condition {
+                    negate: false,
+                    tag: Tag::Gremium,
+                    pattern: "^(Rat|Bezirksvertretung Bad Godesberg)$".parse().unwrap(),
+                },
+                Condition {
+                    negate: true,
+                    tag: Tag::Verfasser,
+                    pattern: "BBB".parse().unwrap(),
+                },
+            ],
+        },
+        Filter {
+            conditions: vec![
+                Condition {
+                    negate: false,
+                    tag: Tag::Beteiligt,
+                    pattern: "^61".parse().unwrap(),
+                },
+                Condition {
+                    negate: true,
+                    tag: Tag::Federführend,
+                    pattern: "^61-3".parse().unwrap(),
+                },
+            ],
+        },
+    ])
+    .unwrap();
+
+    println!("{filter}");
+}
+
 struct ChatWorker<'a> {
     chat_id: ChatId,
     shared: &'a SharedResources,
     last_processed: Option<StreamId>,
     rate_limit: Interval,
+    filters: Vec<Filter>,
 }
 
 enum WorkerResult {
@@ -69,6 +122,7 @@ enum WorkerResult {
     Stopped,
     MigratedTo(ChatId),
 }
+
 struct MessageAcknowledged<'a> {
     id: StreamId,
     _lock: RwLockReadGuard<'a, bool>,
@@ -105,6 +159,7 @@ impl<'a> ChatWorker<'a> {
             shared,
             rate_limit: chat_rate_limit(chat_id < 0),
             last_processed: None,
+            filters: vec![],
         }
     }
 
@@ -167,9 +222,12 @@ impl<'a> ChatWorker<'a> {
         id: StreamId,
         message: &Message,
     ) -> database::Result<WorkerResult> {
-        if !self.should_send(message, false).await? && !self.should_send(message, true).await? {
-            self.acknowledge_message(id).await?;
-            return Ok(WorkerResult::Ok);
+        if !self.should_send(message) {
+            self.update_filters().await?;
+            if !self.should_send(message) {
+                self.acknowledge_message(id).await?;
+                return Ok(WorkerResult::Ok);
+            }
         }
 
         self.rate_limit.tick().await;
@@ -250,10 +308,11 @@ impl<'a> ChatWorker<'a> {
             .take(5);
 
         loop {
-            let should_send = self.should_send(message, true).await?;
+            self.update_filters().await?;
+
             let acknowledged = MessageAcknowledged::acknowledged(id, self).await?;
 
-            let (Some(acknowledged), true) = (acknowledged, should_send) else {
+            let (Some(acknowledged), true) = (acknowledged, self.should_send(message)) else {
                 return Ok((false, WorkerResult::Ok));
             };
 
@@ -317,12 +376,13 @@ impl<'a> ChatWorker<'a> {
         result.map(|x| x.is_some())
     }
 
-    async fn should_send(
-        &mut self,
-        message: &Message,
-        update_filters: bool,
-    ) -> database::Result<bool> {
-        Ok(true)
+    async fn update_filters(&mut self) -> database::Result<()> {
+        self.filters = self.shared.db.get_filters(self.chat_id).await?;
+        Ok(())
+    }
+
+    fn should_send(&mut self, message: &Message) -> bool {
+        self.filters.iter().any(|filter| filter.matches(message))
     }
 }
 

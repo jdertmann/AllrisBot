@@ -1,3 +1,6 @@
+use std::fmt::Display;
+
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use teloxide::types::{InlineKeyboardButton, ParseMode};
 
@@ -82,5 +85,61 @@ impl Tag {
                 "61-3 Stadtverkehr",
             ],
         }
+    }
+}
+
+mod serde_regex {
+    use regex::Regex;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &regex::Regex, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(value.as_str())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<regex::Regex, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = <&str>::deserialize(deserializer)?;
+        Regex::new(s).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Condition {
+    pub tag: Tag,
+    #[serde(with = "serde_regex")]
+    pub pattern: Regex,
+    pub negate: bool,
+}
+
+impl Display for Condition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} passt {} zu \"{}\"",
+            self.tag.label(),
+            if self.negate { "nicht" } else { "" },
+            self.pattern.as_str()
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Filter {
+    pub conditions: Vec<Condition>,
+}
+
+impl Display for Filter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for condition in &self.conditions {
+            writeln!(f, "{condition}")?;
+        }
+
+        Ok(())
     }
 }

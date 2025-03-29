@@ -7,7 +7,7 @@ use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisError, RedisWrite, RetryMethod};
 use tokio::time::{Instant, sleep_until};
 
-use crate::types::Message;
+use crate::types::{Filter, Message};
 
 // define keys
 
@@ -225,6 +225,7 @@ macro_rules! implement_with_retry {
         $conn_struct:ident,
         $conn_struct_shared: ident;
         $(
+            $(#[$attr:ident])?
             $vis:vis async fn $fn_name:ident
             (
                 $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
@@ -232,6 +233,33 @@ macro_rules! implement_with_retry {
             $body:block
         )+
     ) => {
+
+        mod common {
+            use super::*;
+
+            $(
+                pub(super) async fn $fn_name(conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
+                    let request = async {
+                        let $conn = conn.get_connection().await?;
+                        Ok($body)
+                    };
+
+                    match timeout_at(deadline, request).await {
+                        Ok(r) => {
+                            conn.retry_counter = 0;
+                            return Ok(Some(r));
+                        }
+                        Err(e) => {
+                            implement_with_retry!(@reset $($attr)?, conn);
+                            conn.handle_error(e, deadline).await?
+                        }
+                    }
+
+                    Ok(None)
+                }
+            )+
+        }
+
         impl $conn_struct {
         $(
             #[allow(dead_code)]
@@ -242,17 +270,8 @@ macro_rules! implement_with_retry {
                 let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
 
                 loop {
-                    let request = async {
-                        let $conn = self.get_connection().await?;
-                        Ok($body)
-                    };
-
-                    match timeout_at(deadline, request).await {
-                        Ok(r) => {
-                            self.retry_counter = 0;
-                            return Ok(r);
-                        }
-                        Err(e) => self.handle_error(e, deadline).await?,
+                    if let Some(r) = common::$fn_name(self, deadline, $($param_name),*).await? {
+                        return Ok(r)
                     }
                 }
             }
@@ -271,17 +290,8 @@ macro_rules! implement_with_retry {
                         let mut conn = timeout_at(deadline, async { Ok(self.connection.lock().await) }).await?;
 
                         for _ in 0..4 {
-                            let request = async {
-                                let $conn = conn.get_connection().await?;
-                                Ok($body)
-                            };
-
-                            match timeout_at(deadline, request).await {
-                                Ok(r) => {
-                                    conn.retry_counter = 0;
-                                    return Ok(r);
-                                }
-                                Err(e) => conn.handle_error(e, deadline).await?,
+                            if let Some(r) = common::$fn_name(&mut conn, deadline, $($param_name),*).await? {
+                                return Ok(r)
                             }
                         }
 
@@ -291,6 +301,8 @@ macro_rules! implement_with_retry {
             )+
         }
     };
+    (@reset reset_connection_on_error, $conn:expr) => { $conn.connection = None; };
+    (@reset , $conn:expr ) => { };
     (@ret $t:ty) =>  { $t };
     (@ret) => { () };
 }
@@ -400,6 +412,15 @@ implement_with_retry! {
         connection.smembers(REGISTERED_CHATS_KEY).await?
     }
 
+    pub async fn get_filters(connection, chat_id: i64) -> Vec<Filter> {
+        let content : Option<String> = connection.hget(registered_chat_key(chat_id), "filter").await?;
+
+        match content {
+            Some(filter) => serde_json::from_str(&filter).map_err(RedisError::from)?,
+            None => vec![]
+        }
+    }
+
     pub async fn next_message_ready(
         connection,
         stream_id: Option<StreamId>,
@@ -471,6 +492,56 @@ implement_with_retry! {
 
     pub async fn set_last_update(connection, timestamp: DateTime<Utc>) {
         connection.set(LAST_UPDATE_KEY, timestamp.timestamp_millis()).await?
+    }
+
+    #[reset_connection_on_error]
+    pub async fn update_filter(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>)) {
+        let key = registered_chat_key(chat_id);
+        let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
+
+        loop {
+            let ((), current_filters): ((), Option<String>) = redis::pipe()
+                .add_command(redis::cmd("WATCH").arg(&key).to_owned())
+                .add_command(Cmd::hget(&key, "filter"))
+                .query_async(connection)
+                .await?;
+
+            let mut filters = match &current_filters {
+                Some(filter) => serde_json::from_str(filter).map_err(RedisError::from)?,
+                None => vec![]
+            };
+
+            update(&mut filters);
+
+            let value: redis::Value = if filters.is_empty() {
+                if !current_filters.is_none() {
+                    redis::pipe()
+                        .atomic()
+                        .add_command(Cmd::srem(REGISTERED_CHATS_KEY, chat_id))
+                        .add_command(Cmd::del(registered_chat_key(chat_id)))
+                        .query_async(connection)
+                        .await?
+                } else {
+                    // nothing has changed
+                    break
+                }
+            } else {
+                let filter_str = serde_json::to_string(&filters).map_err(RedisError::from)?;
+
+                let mut script = redis::cmd("EVAL");
+                script.arg(script_content).arg(3).arg(&[SCHEDULED_MESSAGES_KEY,REGISTERED_CHATS_KEY, &key]).arg(chat_id).arg(&filter_str);
+
+                redis::pipe()
+                    .atomic()
+                    .add_command(script)
+                    .query_async(connection)
+                    .await?
+            };
+
+            if !matches!(value, redis::Value::Nil) {
+                break
+            }
+        }
     }
 
     pub async fn get_chat_state(

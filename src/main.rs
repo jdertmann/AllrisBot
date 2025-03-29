@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use broadcasting::broadcast_task;
 use clap::Parser;
-use database::{DatabaseConnection, SharedDatabaseConnection};
 use redis::{ConnectionInfo, IntoConnectionInfo};
 use tokio::sync::mpsc;
 
@@ -75,13 +74,7 @@ async fn main() -> ExitCode {
     let dispatcher = if args.ignore_messages {
         bot_commands::DispatcherTask::do_nothing()
     } else {
-        bot_commands::DispatcherTask::new(
-            bot.clone(),
-            SharedDatabaseConnection::new(DatabaseConnection::new(
-                db_client.clone(),
-                Some(Duration::from_secs(5)),
-            )),
-        )
+        bot_commands::DispatcherTask::new(bot.clone(), db_client.clone())
     };
 
     let scraper = allris::scraper(

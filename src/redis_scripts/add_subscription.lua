@@ -12,7 +12,7 @@ if entries and #entries > 0 then
 end
 
 local hset_result = redis.call("SADD", KEYS[2], ARGV[1])
-redis.call("HSETNX", KEYS[3], "filter", ARGV[2])
+redis.call("HSET", KEYS[3], "filter", ARGV[2])
 redis.call("HSETNX", KEYS[3], "last_sent", last_entry_id)
 
 return hset_result
