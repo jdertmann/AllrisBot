@@ -70,44 +70,6 @@ impl Filter {
             .all(|condition| condition.matches(message))
     }
 }
-#[test]
-fn serialize() {
-    use crate::types::Tag;
-
-    let filter = serde_json::to_string_pretty(&vec![
-        Filter {
-            conditions: vec![
-                Condition {
-                    negate: false,
-                    tag: Tag::Gremium,
-                    pattern: "^(Rat|Bezirksvertretung Bad Godesberg)$".parse().unwrap(),
-                },
-                Condition {
-                    negate: true,
-                    tag: Tag::Verfasser,
-                    pattern: "BBB".parse().unwrap(),
-                },
-            ],
-        },
-        Filter {
-            conditions: vec![
-                Condition {
-                    negate: false,
-                    tag: Tag::Beteiligt,
-                    pattern: "^61".parse().unwrap(),
-                },
-                Condition {
-                    negate: true,
-                    tag: Tag::Federführend,
-                    pattern: "^61-3".parse().unwrap(),
-                },
-            ],
-        },
-    ])
-    .unwrap();
-
-    println!("{filter}");
-}
 
 struct ChatWorker<'a> {
     chat_id: ChatId,
