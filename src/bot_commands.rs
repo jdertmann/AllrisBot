@@ -361,8 +361,8 @@ async fn manage_channel(
             can_edit_stories: None,
             can_delete_stories: None,
             can_manage_topics: None,
-        })
-        .request_title();
+        });
+        // TODO (later version of teloxide): request_title = true
 
     let button =
         KeyboardButton::new("Channel auswählen").request(ButtonRequest::RequestChat(button));
@@ -588,11 +588,11 @@ async fn receive_channel_selection(
         return Ok(());
     }
 
-    let text = if let Some(title) = &shared.title {
-        format!("Channel „{title}” wurde ausgewählt!")
-    } else {
-        "Channel wurde ausgewählt!".to_string()
-    };
+    // let text = if let Some(title) = &shared.title {
+    //     format!("Channel „{title}” wurde ausgewählt!")
+    // } else {
+    let text = "Channel wurde ausgewählt!".to_string();
+    // };
 
     dialogue
         .update(StateWithChannel {

@@ -14,6 +14,7 @@ use crate::database::{self, StreamId};
 use crate::types::{ChatId, Message};
 
 const ADDITIONAL_ERRORS: &[&str] = &[
+    "Forbidden: bot was kicked from the channel chat",
     "Forbidden: bot was kicked from the group chat",
     "Bad Request: not enough rights to send text messages to the chat",
 ];
