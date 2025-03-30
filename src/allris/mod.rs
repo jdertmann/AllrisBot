@@ -3,7 +3,7 @@ mod oparl;
 
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use oparl::Paper;
 use reqwest::{Client, Response};
 use teloxide::types::InlineKeyboardButton;
@@ -15,11 +15,11 @@ use tokio_retry::strategy::ExponentialBackoff;
 use url::Url;
 
 use self::html::{WebsiteData, scrape_website};
-use crate::database::{self, DatabaseConnection};
+use crate::database::{self, DatabaseConnection, SharedDatabaseConnection};
 use crate::types::{Message, Tag};
 
 #[derive(Debug, Error)]
-enum Error {
+pub enum Error {
     #[error("web request error: {0}")]
     Reqwest(#[from] reqwest::Error),
     #[error("db error: {0}")]
@@ -160,6 +160,37 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         buttons,
         tags,
     })
+}
+
+pub async fn scan_day(
+    allris_url: &AllrisUrl,
+    db: &SharedDatabaseConnection,
+    day: NaiveDate,
+) -> Result<(), Error> {
+    let http_client = reqwest::Client::new();
+    let papers = oparl::get_day(&http_client, allris_url, day).await?;
+
+    for paper in papers {
+        let Some((_, volfdnr)) = paper.id.query_pairs().find(|(q, _)| q == "id") else {
+            log::warn!("ID deviates from the usual pattern, skipping: {}", paper.id);
+            continue;
+        };
+
+        // if db operations fail, it is ok to abort the whole operation (`?` operator).
+        // If redis is down, we'll just have to try again on a later invocation.
+
+        if db.is_known_volfdnr(&volfdnr).await? {
+            continue; // item already known
+        }
+
+        if let Some(message) = generate_notification(&http_client, &paper).await {
+            db.schedule_broadcast(&volfdnr, &message).await?;
+        } else {
+            db.add_known_volfdnr(&volfdnr).await?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn do_update(allris_url: &AllrisUrl, db: &redis::Client) -> Result<(), Error> {

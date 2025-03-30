@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::NaiveDate;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::ShutdownToken;
@@ -10,10 +11,11 @@ use teloxide::types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
 
-use crate::Bot;
 use crate::admin::AdminToken;
+use crate::allris::AllrisUrl;
 use crate::database::{DatabaseConnection, SharedDatabaseConnection};
 use crate::types::{Condition, Filter, Tag};
+use crate::{Bot, allris};
 
 #[derive(BotCommands, Clone, Debug)]
 #[command(
@@ -35,9 +37,12 @@ enum Command {
     Cancel,
     #[command(hide)]
     Admin(String),
+    #[command(hide)]
+    ScanDay(chrono::NaiveDate),
 }
 
 struct Context {
+    allris_url: AllrisUrl,
     database: SharedDatabaseConnection,
     token: Option<Mutex<AdminToken>>,
 }
@@ -135,9 +140,9 @@ async fn handle_message(
 
         if matches!(command, Some(Command::Cancel)) {
             let message = if matches!(state, State::Start) {
-                "No command to cancel ..."
+                "Kein Befehl aktiv ..."
             } else {
-                "Command was cancelled!"
+                "Befehl wurde abgebrochen!"
             };
             dialogue.reset().await?;
             bot.send_message(msg.chat.id, message).await?;
@@ -203,7 +208,37 @@ async fn handle_command(
         Command::Help => help(bot, msg).await?,
         Command::Admin(token) => admin(bot, msg, context, token).await?,
         Command::Cancel => unreachable!(),
+        Command::ScanDay(date) => scan_day(bot, msg, context, date).await?,
     }
+
+    Ok(())
+}
+
+macro_rules! check_admin_permission {
+    ($db:expr,$chat:expr) => {
+        if !$db.is_admin($chat.id.0).await? {
+            let user = $chat.title().or_else(|| $chat.username());
+            log::warn!(
+                "User {} [{user:?}] tried to use command without permission!",
+                $chat.id.0
+            );
+            return Ok(());
+        }
+    };
+}
+
+async fn scan_day(bot: &Bot, msg: &Message, context: &Context, date: &NaiveDate) -> HandlerResult {
+    check_admin_permission!(context.database, msg.chat);
+
+    let message = match allris::scan_day(&context.allris_url, &context.database, *date).await {
+        Ok(()) => "OK!",
+        Err(e) => {
+            log::error!("Error while scanning day: {e}");
+            "Ein Fehler ist aufgetreten. Schau im Log nach!"
+        }
+    };
+
+    bot.send_message(msg.chat.id, message).await?;
 
     Ok(())
 }
@@ -297,7 +332,9 @@ async fn start_delete_filter(
     let keyboard: Vec<_> = buttons.chunks(3).map(Vec::from).collect();
 
     bot.send_message(msg.chat.id, response)
-        .reply_markup(ReplyMarkup::Keyboard(KeyboardMarkup::new(keyboard).one_time_keyboard()))
+        .reply_markup(ReplyMarkup::Keyboard(
+            KeyboardMarkup::new(keyboard).one_time_keyboard(),
+        ))
         .await?;
 
     Ok(())
@@ -332,12 +369,14 @@ async fn admin(
     context: &Context,
     token: &str,
 ) -> Result<(), HandlerError> {
-    Ok(if let Some(t) = &context.token {
+    if let Some(t) = &context.token {
         if t.lock().await.validate(token) && msg.chat.is_private() {
             context.database.set_admin(msg.chat.id.0).await?;
             bot.send_message(msg.chat.id, "Ok").await?;
         }
-    })
+    }
+
+    Ok(())
 }
 
 async fn delete_all_filters(
@@ -471,6 +510,7 @@ async fn receive_pattern(
 fn create(
     bot: Bot,
     client: redis::Client,
+    allris_url: AllrisUrl,
     admin_token: Option<AdminToken>,
 ) -> Dispatcher<Bot, HandlerError, teloxide::dispatching::DefaultKey> {
     let connection = SharedDatabaseConnection::new(DatabaseConnection::new(
@@ -480,6 +520,7 @@ fn create(
 
     let context = Arc::new(Context {
         database: connection,
+        allris_url,
         token: admin_token.map(Mutex::new),
     });
 
@@ -501,8 +542,13 @@ pub struct DispatcherTask {
 
 impl DispatcherTask {
     /// Creates a dispatcher to handle the bot's incoming messages.
-    pub fn new(bot: Bot, db: redis::Client, admin_token: Option<AdminToken>) -> Self {
-        let mut dispatcher = create(bot, db, admin_token);
+    pub fn new(
+        bot: Bot,
+        db: redis::Client,
+        allris_url: AllrisUrl,
+        admin_token: Option<AdminToken>,
+    ) -> Self {
+        let mut dispatcher = create(bot, db, allris_url, admin_token);
         let token = dispatcher.shutdown_token();
         tokio::spawn(async move { dispatcher.dispatch().await });
 

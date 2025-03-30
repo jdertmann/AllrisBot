@@ -69,7 +69,7 @@ struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// suppress all output
+    /// disable logging
     #[arg(short, long, conflicts_with = "verbose")]
     quiet: bool,
 }
@@ -110,7 +110,12 @@ async fn main() -> ExitCode {
     let dispatcher = if args.ignore_messages {
         bot_commands::DispatcherTask::do_nothing()
     } else {
-        bot_commands::DispatcherTask::new(bot.clone(), db_client.clone(), admin_token)
+        bot_commands::DispatcherTask::new(
+            bot.clone(),
+            db_client.clone(),
+            args.allris_url.clone(),
+            admin_token,
+        )
     };
 
     let scraper = allris::scraper(
