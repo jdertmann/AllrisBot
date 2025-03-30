@@ -12,11 +12,12 @@ use admin::AdminToken;
 use broadcasting::broadcast_task;
 use clap::Parser;
 use redis::{ConnectionInfo, IntoConnectionInfo};
+use teloxide::{adaptors::CacheMe, prelude::RequesterExt};
 use tokio::sync::mpsc;
 
 use crate::allris::AllrisUrl;
 
-type Bot = teloxide::Bot;
+type Bot =  CacheMe<teloxide::Bot>;
 
 /// Telegram bot that notifies about newly published documents in the Allris 4 council information system.
 #[derive(Parser)]
@@ -99,7 +100,7 @@ async fn main() -> ExitCode {
     init_logging(&args);
 
     let db_client = redis::Client::open(args.redis_url).unwrap();
-    let bot = teloxide::Bot::new(&args.bot_token);
+    let bot = teloxide::Bot::new(&args.bot_token).cache_me();
 
     let admin_token = args.generate_admin_token.then(|| {
         let token = AdminToken::new();
