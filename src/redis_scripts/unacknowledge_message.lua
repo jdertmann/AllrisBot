@@ -19,10 +19,10 @@ local current_id = redis.call('HGET', key, "last_sent")
 
 if current_id == prev_id then
     -- makes this script idempotent
-    return prev_id
+    return 1
 elseif current_id == expected_current_id then
     redis.call('HSET', key, "last_sent", prev_id)
-    return prev_id
+    return 1
 else
-    return nil
+    return 0
 end

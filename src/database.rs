@@ -367,12 +367,12 @@ implement_with_retry! {
     pub async fn acknowledge_message (
         connection,
         chat_id: i64,
-        next_id: StreamId
+        message_id: StreamId
     ) -> bool {
         script!("acknowledge_message.lua")
             .key(registered_chat_key(chat_id))
             .key(SCHEDULED_MESSAGES_KEY)
-            .arg(next_id)
+            .arg(message_id)
             .invoke_async(connection)
             .await?
     }
@@ -396,7 +396,7 @@ implement_with_retry! {
         connection,
         chat_id: i64,
         message_id: StreamId
-    ) -> Option<StreamId> {
+    ) -> bool {
         script!("unacknowledge_message.lua")
             .key(registered_chat_key(chat_id))
             .key(SCHEDULED_MESSAGES_KEY)

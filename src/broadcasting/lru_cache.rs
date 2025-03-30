@@ -119,6 +119,26 @@ impl<K: Eq + Hash + Copy, V, E: EvictionStrategy<K>> Cache<K, V, E> {
 
         Ok(CacheItem(cell))
     }
+
+    pub async fn get_some<Err, Fut: Future<Output = Result<Option<V>, Err>>>(
+        &self,
+        key: K,
+        init: impl FnOnce() -> Fut,
+    ) -> Result<Option<CacheItem<V>>, Err> {
+        let init2 = || async {
+            match init().await {
+                Ok(Some(r)) => Ok(r),
+                Ok(None) => Err(None),
+                Err(e) => Err(Some(e)),
+            }
+        };
+
+        match self.get(key, init2).await {
+            Ok(next) => Ok(Some(next)),
+            Err(None) => Ok(None),
+            Err(Some(e)) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

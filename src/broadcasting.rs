@@ -1,56 +1,25 @@
 mod lru_cache;
+mod message_sender;
 
 use std::collections::HashMap;
-use std::ops::ControlFlow;
+use std::collections::hash_map::Entry;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use lru_cache::Lru;
-use teloxide::RequestError;
-use teloxide::payloads::SendMessageSetters as _;
-use teloxide::prelude::Requester as _;
-use teloxide::types::InlineKeyboardMarkup;
-use tokio::sync::{RwLock, RwLockReadGuard, Semaphore, mpsc};
-use tokio::time::{Instant, Interval, MissedTickBehavior, interval, sleep, sleep_until};
-use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
 
-use self::lru_cache::{Cache, CacheItem};
+use self::lru_cache::Cache;
+use self::message_sender::MessageSender;
 use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnection, StreamId};
 use crate::types::{ChatId, Condition, Filter, Message};
 
-const ADDITIONAL_ERRORS: &[&str] = &[
-    "Forbidden: bot was kicked from the group chat",
-    "Bad Request: not enough rights to send text messages to the chat",
-];
-
 const BROADCASTS_PER_SECOND: f32 = 30.;
-const GROUP_MESSAGES_PER_MINUTE: f32 = 20.;
-const CHAT_MESSAGES_PER_SECOND: f32 = 1.;
-
-const PARALLEL_SENDS: usize = 3;
-const DELAY_AFTER_SEND: f32 = PARALLEL_SENDS as f32 / BROADCASTS_PER_SECOND;
-
-fn chat_rate_limit(is_group: bool) -> Interval {
-    let interval = if is_group {
-        60. / GROUP_MESSAGES_PER_MINUTE
-    } else {
-        1. / CHAT_MESSAGES_PER_SECOND
-    };
-
-    let mut interval = tokio::time::interval(Duration::from_secs_f32(interval));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    interval
-}
-
-struct SharedResources {
-    bot: crate::Bot,
-    db: SharedDatabaseConnection,
-    semaphore: Semaphore,
-    hard_shutdown: tokio::sync::RwLock<bool>,
-    next_message_cache: Cache<StreamId, (StreamId, Message), Lru<StreamId>>,
-}
+const MESSAGE_INTERVAL_CHAT: Duration = Duration::from_secs(1);
+const MESSAGE_INTERVAL_GROUP: Duration = Duration::from_secs(3);
 
 impl Condition {
     fn matches(&self, message: &Message) -> bool {
@@ -71,292 +40,109 @@ impl Filter {
     }
 }
 
-struct ChatWorker<'a> {
-    chat_id: ChatId,
-    shared: &'a SharedResources,
-    last_processed: Option<StreamId>,
-    rate_limit: Interval,
-    filters: Vec<Filter>,
-}
-
 enum WorkerResult {
-    Ok,
-    Stopped,
-    TokenInvalid,
+    Processed(StreamId),
+    OutOfSync,
+    ChatStopped,
+    InvalidToken,
+    ShuttingDown,
     MigratedTo(ChatId),
 }
 
-struct MessageAcknowledged<'a> {
-    id: StreamId,
-    _lock: RwLockReadGuard<'a, bool>,
-}
-
-impl<'a> MessageAcknowledged<'a> {
-    async fn acknowledged(
-        id: StreamId,
-        worker: &mut ChatWorker<'a>,
-    ) -> database::Result<Option<Self>> {
-        let lock = match worker.shared.hard_shutdown.try_read() {
-            Ok(lock) if !*lock => lock,
-            _ => return Ok(None),
-        };
-
-        if worker.acknowledge_message(id).await? {
-            Ok(Some(Self { id, _lock: lock }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn unacknowledge(self, worker: &mut ChatWorker<'_>) -> database::Result<()> {
-        worker.unacknowledge_message(self.id).await?;
-
-        Ok(())
+fn delay(chat_id: ChatId) -> Duration {
+    if chat_id < 0 {
+        MESSAGE_INTERVAL_GROUP
+    } else {
+        MESSAGE_INTERVAL_CHAT
     }
 }
 
-impl<'a> ChatWorker<'a> {
-    fn new(chat_id: ChatId, shared: &'a SharedResources) -> Self {
-        ChatWorker {
-            chat_id,
-            shared,
-            rate_limit: chat_rate_limit(chat_id < 0),
-            last_processed: None,
-            filters: vec![],
-        }
-    }
+type OneshotResponse = (database::Result<WorkerResult>, bool);
 
-    async fn run(mut self) -> (Self, database::Result<WorkerResult>) {
-        let future = async {
-            let last_processed = if let Some(id) = self.last_processed {
-                id
-            } else {
-                match self.shared.db.get_chat_state(self.chat_id).await? {
-                    ChatState::Active { last_sent } => last_sent,
-                    ChatState::Migrated { to } => {
-                        return Ok(WorkerResult::MigratedTo(to));
-                    }
-                    ChatState::Stopped => {
-                        return Ok(WorkerResult::Stopped);
-                    }
-                }
-            };
+struct BroadcastResources {
+    bot: crate::Bot,
+    db: SharedDatabaseConnection,
+    hard_shutdown: watch::Sender<bool>,
+    next_message_cache: Cache<StreamId, (StreamId, Message), Lru<StreamId>>,
+    sender_tx: mpsc::Sender<(MessageSender, oneshot::Sender<OneshotResponse>)>,
+}
 
-            self.last_processed = Some(last_processed);
+impl BroadcastResources {
+    async fn try_process_next(&self, chat_id: ChatId) -> database::Result<WorkerResult> {
+        let started = Instant::now();
 
-            match self.get_next_message(last_processed).await?.as_deref() {
-                Some((id, message)) => self.process_message(*id, message).await,
-                None => Ok(WorkerResult::Ok),
-            }
+        let last_sent = match self.db.get_chat_state(chat_id).await? {
+            ChatState::Active { last_sent } => last_sent,
+            ChatState::Migrated { to } => return Ok(WorkerResult::MigratedTo(to)),
+            ChatState::Stopped => return Ok(WorkerResult::ChatStopped),
         };
 
-        let result = future.await;
-
-        (self, result)
-    }
-
-    async fn get_next_message(
-        &self,
-        last_processed: StreamId,
-    ) -> database::Result<Option<CacheItem<(StreamId, Message)>>> {
-        let get_next = || async {
-            match self.shared.db.get_next_message(last_processed).await {
-                Ok(Some(r)) => Ok(r),
-                Ok(None) => Err(None),
-                Err(e) => Err(Some(e)),
-            }
-        };
-
-        let result = self
-            .shared
+        let next_message = self
             .next_message_cache
-            .get(last_processed, get_next)
-            .await;
+            .get_some(last_sent, || self.db.get_next_message(last_sent))
+            .await?;
 
-        match result {
-            Ok(next) => Ok(Some(next)),
-            Err(None) => Ok(None),
-            Err(Some(e)) => Err(e),
-        }
-    }
-
-    async fn process_message(
-        &mut self,
-        id: StreamId,
-        message: &Message,
-    ) -> database::Result<WorkerResult> {
-        if !self.should_send(message) {
-            self.update_filters().await?;
-            if !self.should_send(message) {
-                self.acknowledge_message(id).await?;
-                return Ok(WorkerResult::Ok);
-            }
-        }
-
-        self.rate_limit.tick().await;
-
-        let Ok(permit) = self.shared.semaphore.acquire().await else {
-            return Ok(WorkerResult::Ok);
-        };
-        let permit_acquired = Instant::now();
-
-        let (was_sent, result) = self.send_message(id, message).await?;
-
-        if was_sent {
-            sleep_until(permit_acquired + Duration::from_secs_f32(DELAY_AFTER_SEND)).await;
-        } else {
-            self.rate_limit.reset_immediately();
-        }
-
-        drop(permit);
-
-        Ok(result)
-    }
-
-    async fn handle_response(
-        &mut self,
-        response: Result<impl Sized, RequestError>,
-        backoff: Option<Duration>,
-        acknowledged: MessageAcknowledged<'a>,
-    ) -> database::Result<ControlFlow<WorkerResult, Duration>> {
-        let response = response.inspect_err(|e| log::warn!("Failed to send message: {e}"));
-
-        let result = match response {
-            Ok(_) => ControlFlow::Break(WorkerResult::Ok),
-            Err(RequestError::Api(e)) if is_chat_invalid(&e) => {
-                self.shared.db.remove_subscription(self.chat_id).await?;
-                self.last_processed = None;
-                ControlFlow::Break(WorkerResult::Stopped)
-            }
-            Err(RequestError::Api(teloxide::ApiError::InvalidToken)) => {
-                // token revoked?
-                ControlFlow::Break(WorkerResult::TokenInvalid)
-            }
-            Err(RequestError::MigrateToChatId(new_chat_id)) => {
-                acknowledged.unacknowledge(self).await?;
-                self.shared
-                    .db
-                    .migrate_chat(self.chat_id, new_chat_id.0)
-                    .await?;
-                self.last_processed = None;
-                ControlFlow::Break(WorkerResult::MigratedTo(new_chat_id.0))
-            }
-            Err(RequestError::RetryAfter(secs)) => {
-                acknowledged.unacknowledge(self).await?;
-                ControlFlow::Continue(secs.duration())
-            }
-            _ => {
-                if let Some(backoff) = backoff {
-                    acknowledged.unacknowledge(self).await?;
-                    ControlFlow::Continue(backoff)
-                } else {
-                    log::warn!("Failed definitely, not retrying!");
-                    ControlFlow::Break(WorkerResult::Ok)
-                }
-            }
+        let sender = match next_message {
+            Some(next) => MessageSender::new(chat_id, next),
+            None => return Ok(WorkerResult::Processed(last_sent)),
         };
 
-        Ok(result)
+        if !sender.check_filters(self).await? {
+            if sender.acknowledge_message(self).await? {
+                return Ok(WorkerResult::Processed(sender.message_id()));
+            } else {
+                return Ok(WorkerResult::OutOfSync);
+            }
+        }
+
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+
+        if self.sender_tx.send((sender, oneshot_tx)).await.is_err() {
+            return Ok(WorkerResult::ShuttingDown);
+        }
+
+        match oneshot_rx.await {
+            Ok((r, true)) => {
+                sleep_until(started + delay(chat_id)).await;
+                r
+            }
+            Ok((r, false)) => r,
+            Err(_) => Ok(WorkerResult::ShuttingDown),
+        }
     }
 
-    async fn send_message(
-        &mut self,
-        id: StreamId,
-        message: &Message,
-    ) -> database::Result<(bool, WorkerResult)> {
-        let mut backoff = ExponentialBackoff::from_millis(10)
-            .factor(10)
-            .max_delay(Duration::from_secs(30))
-            .map(jitter)
-            .take(5);
+    async fn sender_task(
+        self: Arc<Self>,
+        mut sender_rx: mpsc::Receiver<(MessageSender, oneshot::Sender<OneshotResponse>)>,
+    ) {
+        let mut shutdown = self.hard_shutdown.subscribe();
+        let mut interval = interval(Duration::from_secs_f32(1. / BROADCASTS_PER_SECOND));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            self.update_filters().await?;
-
-            let acknowledged = MessageAcknowledged::acknowledged(id, self).await?;
-
-            let (Some(acknowledged), true) = (acknowledged, self.should_send(message)) else {
-                return Ok((false, WorkerResult::Ok));
+            let recv = async {
+                interval.tick().await;
+                sender_rx.recv().await
             };
 
-            let mut request = self
-                .shared
-                .bot
-                .send_message(teloxide::types::ChatId(self.chat_id), &message.text)
-                .parse_mode(message.parse_mode);
-
-            if !message.buttons.is_empty() {
-                request =
-                    request.reply_markup(InlineKeyboardMarkup::new(vec![message.buttons.clone()]));
-            }
-
-            log::debug!(
-                "Sending {id}, {}...",
-                &message.text.chars().take(20).collect::<String>()
-            );
-
-            let response = request.await;
-            log::debug!("Sent {id}, response: {response:?}",);
-
-            match self
-                .handle_response(response, backoff.next(), acknowledged)
-                .await?
-            {
-                ControlFlow::Break(result) => {
-                    return Ok((true, result));
+            let (sender, result_tx) = tokio::select! {
+                _ = shutdown.wait_for(|x| *x) => break,
+                next = recv => match next {
+                    Some(next) => next,
+                    None => break
                 }
-                ControlFlow::Continue(retry_after) => {
-                    sleep(retry_after).await;
-                }
-            }
+            };
+
+            let mut message_sent = false;
+            let result = sender.send_message(&self, &mut message_sent).await;
+            let _ = result_tx.send((result, message_sent));
         }
-    }
-
-    async fn acknowledge_message(&mut self, id: StreamId) -> database::Result<bool> {
-        let result = self.shared.db.acknowledge_message(self.chat_id, id).await;
-
-        log::debug!("Ack {id}: {result:?}");
-
-        self.last_processed = match result {
-            Ok(true) => Some(id),
-            _ => None,
-        };
-
-        result
-    }
-
-    async fn unacknowledge_message(&mut self, id: StreamId) -> database::Result<bool> {
-        let result = self.shared.db.unacknowledge_message(self.chat_id, id).await;
-
-        log::debug!("Unack {id}: {result:?}");
-
-        if matches!(result, Ok(None)) {
-            log::warn!("Queue got out of sync!");
-        }
-
-        self.last_processed = result.as_ref().ok().copied().flatten();
-
-        result.map(|x| x.is_some())
-    }
-
-    async fn update_filters(&mut self) -> database::Result<()> {
-        self.filters = self.shared.db.get_filters(self.chat_id).await?;
-        Ok(())
-    }
-
-    fn should_send(&mut self, message: &Message) -> bool {
-        self.filters.iter().any(|filter| filter.matches(message))
     }
 }
 
-enum WorkerState<'a> {
-    Idle {
-        worker: ChatWorker<'a>,
-        since: Instant,
-    },
-    Running {
-        restart: bool,
-    },
+#[derive(Default)]
+struct ProcessingState {
+    should_restart: bool,
 }
 
 pub enum ShutdownSignal {
@@ -364,62 +150,31 @@ pub enum ShutdownSignal {
     Hard,
 }
 
-struct BroadcastTaskContext<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> {
-    shared: &'a SharedResources,
+struct BroadcastManager<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> {
+    resources: &'a BroadcastResources,
     latest_entry_id: Option<StreamId>,
-    worker_states: HashMap<i64, WorkerState<'a>>,
-    run_worker: F,
-    running_workers: FuturesUnordered<Fut>,
+    states: HashMap<i64, ProcessingState>,
+    process_next_message: F,
+    processing: FuturesUnordered<Fut>,
 }
 
-impl<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> BroadcastTaskContext<'a, Fut, F> {
-    fn send_next_if_available(&mut self, worker: ChatWorker<'a>) {
-        if worker.last_processed < self.latest_entry_id {
-            self.worker_states
-                .insert(worker.chat_id, WorkerState::Running { restart: false });
+struct InvalidToken;
 
-            self.running_workers.push((self.run_worker)(worker));
-        } else {
-            self.set_idle(worker);
-        }
-    }
-
-    fn set_idle(&mut self, worker: ChatWorker<'a>) {
-        self.worker_states.insert(
-            worker.chat_id,
-            WorkerState::Idle {
-                worker,
-                since: Instant::now(),
-            },
-        );
-    }
-
+impl<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> BroadcastManager<'a, Fut, F> {
     fn trigger_chat(&mut self, chat_id: ChatId) {
-        match self.worker_states.remove(&chat_id) {
-            Some(WorkerState::Idle { worker, .. }) => {
-                self.send_next_if_available(worker);
+        match self.states.entry(chat_id) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().should_restart = true;
             }
-            Some(WorkerState::Running { .. }) => {
-                let new_state = WorkerState::Running { restart: true };
-                self.worker_states.insert(chat_id, new_state);
-            }
-            None => {
-                self.send_next_if_available(ChatWorker::new(chat_id, self.shared));
+            Entry::Vacant(entry) => {
+                self.processing
+                    .push((self.process_next_message)(self.resources, chat_id));
+                entry.insert(ProcessingState::default());
             }
         }
     }
 
-    fn cleanup(&mut self) {
-        let now = Instant::now();
-        self.worker_states.retain(|_, state| match state {
-            WorkerState::Idle { since, .. } => {
-                now.duration_since(*since) < Duration::from_secs(3600)
-            }
-            WorkerState::Running { .. } => true,
-        });
-    }
-
-    fn message_scheduled(&mut self, id: StreamId, active_chats: Vec<ChatId>) {
+    fn on_message_scheduled(&mut self, id: StreamId, active_chats: Vec<ChatId>) {
         self.latest_entry_id = Some(id);
 
         for chat_id in active_chats {
@@ -427,32 +182,28 @@ impl<'a, Fut, F: Fn(ChatWorker<'a>) -> Fut> BroadcastTaskContext<'a, Fut, F> {
         }
     }
 
-    fn handle_worker_finished(
+    fn on_processing_finished(
         &mut self,
-        (mut worker, result): (ChatWorker<'a>, database::Result<WorkerResult>),
-    ) -> Result<(), ()> {
-        let send_next = match result {
-            Ok(WorkerResult::Ok) => true,
-            Ok(WorkerResult::Stopped) => match self.worker_states.get(&worker.chat_id) {
-                Some(&WorkerState::Running { restart }) => restart,
-                _ => false,
-            },
-            Ok(WorkerResult::MigratedTo(new_id)) => {
-                self.trigger_chat(new_id);
-                false
+        chat_id: ChatId,
+        result: database::Result<WorkerResult>,
+    ) -> Result<(), InvalidToken> {
+        let restart = self.states.remove(&chat_id).unwrap().should_restart;
+        match result {
+            Ok(WorkerResult::Processed(stream_id)) => {
+                if Some(stream_id) < self.latest_entry_id {
+                    self.trigger_chat(chat_id);
+                }
             }
-            Ok(WorkerResult::TokenInvalid) => return Err(()),
-            Err(e) => {
-                log::error!("Database error: {e}");
-                worker.last_processed = None;
-                false
+            Ok(WorkerResult::OutOfSync) => self.trigger_chat(chat_id),
+            Ok(WorkerResult::ChatStopped) => {
+                if restart {
+                    self.trigger_chat(chat_id);
+                }
             }
-        };
-
-        if send_next {
-            self.send_next_if_available(worker);
-        } else {
-            self.set_idle(worker);
+            Ok(WorkerResult::MigratedTo(chat_id)) => self.trigger_chat(chat_id),
+            Ok(WorkerResult::ShuttingDown) => (),
+            Ok(WorkerResult::InvalidToken) => return Err(InvalidToken),
+            Err(e) => log::error!("Database error: {e}"),
         }
 
         Ok(())
@@ -494,31 +245,35 @@ pub async fn broadcast_task(
 ) {
     let conn = DatabaseConnection::new(db.clone(), None);
 
-    let shared = SharedResources {
+    let (sender_tx, sender_rx) = mpsc::channel(3);
+
+    let resources = Arc::new(BroadcastResources {
         bot,
+        sender_tx,
         db: SharedDatabaseConnection::new(conn),
-        semaphore: Semaphore::new(PARALLEL_SENDS),
-        hard_shutdown: RwLock::new(false),
+        hard_shutdown: watch::Sender::new(false),
         next_message_cache: Cache::new(Lru::new(15)),
-    };
+    });
+
+    let sender_handle = tokio::spawn(resources.clone().sender_task(sender_rx));
 
     let mut soft_shutdown = false;
 
-    let mut cx = BroadcastTaskContext {
-        shared: &shared,
+    let mut cx = BroadcastManager {
+        resources: &resources,
         latest_entry_id: None,
-        worker_states: HashMap::new(),
-        run_worker: |worker| worker.run(),
-        running_workers: FuturesUnordered::new(),
+        states: HashMap::new(),
+        process_next_message: |shared, chat_id| async move {
+            let result = shared.try_process_next(chat_id).await;
+            (chat_id, result)
+        },
+        processing: FuturesUnordered::new(),
     };
-
-    let mut cleanup_timer = interval(Duration::from_secs(3600));
-    cleanup_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let conn = DatabaseConnection::new(db, None);
     let mut next_message_ready = pin!(cx.next_message_ready(conn, false));
 
-    while !(soft_shutdown && cx.running_workers.is_empty()) {
+    while !(soft_shutdown && cx.processing.is_empty()) {
         tokio::select! {
             biased;
             signal = shutdown_rx.recv() => match signal {
@@ -529,56 +284,21 @@ pub async fn broadcast_task(
                 let was_error = result.is_err();
 
                 match result {
-                    Ok((id, active_chats)) => cx.message_scheduled(id, active_chats),
+                    Ok((id, active_chats)) => cx.on_message_scheduled(id, active_chats),
                     Err(e) => log::error!("Database error: {e}")
                 };
 
                 next_message_ready.set(cx.next_message_ready(conn, was_error));
             },
-            Some(result) = cx.running_workers.next(), if !cx.running_workers.is_empty() => {
-                if cx.handle_worker_finished(result).is_err() {
+            Some(result) = cx.processing.next(), if !cx.processing.is_empty() => {
+                if cx.on_processing_finished(result.0, result.1).is_err() {
                     log::error!("Bot token invalid, aborting!");
                     return
                 }
             }
-            _ = cleanup_timer.tick() => cx.cleanup(),
         }
     }
 
-    shared.semaphore.close();
-
-    tokio::select! {
-        _ = cx.running_workers.for_each(|_| async {}) => (),
-        mut lock = shared.hard_shutdown.write() => *lock = true
-    };
-}
-
-fn is_chat_invalid(e: &teloxide::ApiError) -> bool {
-    use teloxide::ApiError::*;
-
-    match e {
-        BotBlocked
-        | ChatNotFound
-        | GroupDeactivated
-        | BotKicked
-        | BotKickedFromSupergroup
-        | UserDeactivated
-        | CantInitiateConversation
-        | NotEnoughRightsToPostMessages
-        | CantTalkWithBots => true,
-        Unknown(err) => ADDITIONAL_ERRORS.contains(&err.as_str()),
-        _ => false,
-    }
-}
-
-// As soon as this fails, `ADDITIONAL_ERRORS` must be adapted
-#[test]
-fn test_api_error_not_yet_added() {
-    use teloxide::ApiError;
-
-    for msg in ADDITIONAL_ERRORS {
-        let api_error: ApiError = serde_json::from_str(&format!("\"{msg}\"")).unwrap();
-        assert_eq!(api_error, ApiError::Unknown(msg.to_string()));
-        assert!(is_chat_invalid(&api_error));
-    }
+    resources.hard_shutdown.send_replace(true);
+    let _ = sender_handle.await;
 }
