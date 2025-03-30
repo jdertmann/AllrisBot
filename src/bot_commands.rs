@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::NaiveDate;
+use futures_util::future::BoxFuture;
 use regex::Regex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::ShutdownToken;
-use teloxide::dispatching::dialogue::InMemStorage;
+use teloxide::dispatching::dialogue::Storage;
 use teloxide::prelude::*;
 use teloxide::types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup};
 use teloxide::utils::command::BotCommands;
@@ -13,7 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::admin::AdminToken;
 use crate::allris::AllrisUrl;
-use crate::database::{DatabaseConnection, SharedDatabaseConnection};
+use crate::database::{self, DatabaseConnection, SharedDatabaseConnection};
 use crate::types::{Condition, Filter, Tag};
 use crate::{Bot, allris};
 
@@ -47,6 +49,35 @@ struct Context {
     token: Option<Mutex<AdminToken>>,
 }
 
+impl<Dialogue> Storage<Dialogue> for Context
+where
+    Dialogue: Send + Sync + Serialize + DeserializeOwned + 'static,
+{
+    type Error = database::Error;
+
+    fn remove_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+    ) -> BoxFuture<'static, Result<(), Self::Error>> {
+        Box::pin(async move { self.database.remove_dialogue(chat_id.0).await })
+    }
+
+    fn update_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+        dialogue: Dialogue,
+    ) -> BoxFuture<'static, Result<(), Self::Error>> {
+        Box::pin(async move { self.database.update_dialogue(chat_id.0, &dialogue).await })
+    }
+
+    fn get_dialogue(
+        self: Arc<Self>,
+        chat_id: ChatId,
+    ) -> BoxFuture<'static, Result<Option<Dialogue>, Self::Error>> {
+        Box::pin(async move { self.database.get_dialogue(chat_id.0).await })
+    }
+}
+
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub enum State {
     #[default]
@@ -66,7 +97,7 @@ pub enum State {
     DeletingFilter,
 }
 
-type FilterDialogue = Dialogue<State, InMemStorage<State>>;
+type FilterDialogue = Dialogue<State, Context>;
 type HandlerResult = Result<(), HandlerError>;
 
 fn tag_keyboard() -> ReplyMarkup {
@@ -110,7 +141,6 @@ fn negation_keyboard() -> ReplyMarkup {
 async fn handle_message(
     bot: Bot,
     me: Me,
-    storage: Arc<InMemStorage<State>>,
     dialogue: FilterDialogue,
     state: State,
     msg: Message,
@@ -127,7 +157,7 @@ async fn handle_message(
                 .database
                 .migrate_chat(old_chat_id.0, new_chat_id.0)
                 .await?;
-            FilterDialogue::new(storage, *new_chat_id)
+            FilterDialogue::new(context, *new_chat_id)
                 .update(state)
                 .await?;
             dialogue.exit().await?;
@@ -186,7 +216,7 @@ async fn handle_message(
 #[derive(Debug, thiserror::Error)]
 enum HandlerError {
     #[error("Database error: {0}")]
-    Database(#[from] crate::database::Error),
+    Database(#[from] database::Error),
     #[error("Storage error: {0}")]
     Storage(#[from] teloxide::dispatching::dialogue::InMemStorageError),
     #[error("Bot error: {0}")]
@@ -199,7 +229,7 @@ async fn handle_command(
     msg: &Message,
     command: &Command,
     context: &Context,
-) -> Result<(), HandlerError> {
+) -> HandlerResult {
     match command {
         Command::AddFilter => add_filter(bot, dialogue, msg).await?,
         Command::ListFilters => list_filters(bot, msg, context).await?,
@@ -286,7 +316,7 @@ async fn delete_filter(
     Ok(())
 }
 
-async fn list_filters(bot: &crate::Bot, msg: &Message, context: &Context) -> HandlerResult {
+async fn list_filters(bot: &Bot, msg: &Message, context: &Context) -> HandlerResult {
     use std::fmt::Write;
     let filters = context.database.get_filters(msg.chat.id.0).await?;
     let mut response = String::new();
@@ -306,7 +336,7 @@ async fn list_filters(bot: &crate::Bot, msg: &Message, context: &Context) -> Han
 }
 
 async fn start_delete_filter(
-    bot: &crate::Bot,
+    bot: &Bot,
     msg: &Message,
     context: &Context,
     dialogue: &FilterDialogue,
@@ -340,11 +370,7 @@ async fn start_delete_filter(
     Ok(())
 }
 
-async fn add_filter(
-    bot: &crate::Bot,
-    dialogue: &Dialogue<State, InMemStorage<State>>,
-    msg: &Message,
-) -> Result<(), HandlerError> {
+async fn add_filter(bot: &Bot, dialogue: &FilterDialogue, msg: &Message) -> HandlerResult {
     dialogue
         .update(State::ReceivingTag {
             previous_conditions: vec![],
@@ -357,18 +383,13 @@ async fn add_filter(
     Ok(())
 }
 
-async fn help(bot: &teloxide::Bot, msg: &Message) -> Result<(), HandlerError> {
+async fn help(bot: &Bot, msg: &Message) -> HandlerResult {
     let help_message = Command::descriptions().to_string();
     bot.send_message(msg.chat.id, help_message).await?;
     Ok(())
 }
 
-async fn admin(
-    bot: &teloxide::Bot,
-    msg: &Message,
-    context: &Context,
-    token: &str,
-) -> Result<(), HandlerError> {
+async fn admin(bot: &Bot, msg: &Message, context: &Context, token: &str) -> HandlerResult {
     if let Some(t) = &context.token {
         if t.lock().await.validate(token) && msg.chat.is_private() {
             context.database.set_admin(msg.chat.id.0).await?;
@@ -379,11 +400,7 @@ async fn admin(
     Ok(())
 }
 
-async fn delete_all_filters(
-    bot: &teloxide::Bot,
-    msg: &Message,
-    context: &Context,
-) -> Result<(), HandlerError> {
+async fn delete_all_filters(bot: &Bot, msg: &Message, context: &Context) -> HandlerResult {
     let removed = context.database.remove_subscription(msg.chat.id.0).await?;
     let message = if removed {
         "Deine Filter wurden entfernt."
@@ -525,11 +542,11 @@ fn create(
     });
 
     let handler = Update::filter_message()
-        .enter_dialogue::<Message, InMemStorage<State>, State>()
+        .enter_dialogue::<Message, Context, State>()
         .endpoint(handle_message);
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![context, InMemStorage::<State>::new()])
+        .dependencies(dptree::deps![context])
         .default_handler(|update| async move {
             log::info!("Missed update: {:?}", update.kind);
         })

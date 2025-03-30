@@ -4,7 +4,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures_util::lock::Mutex;
 use redis::aio::MultiplexedConnection;
-use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisError, RedisWrite, RetryMethod};
+use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisWrite, RetryMethod};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep_until};
 
 use crate::types::{Filter, Message};
@@ -21,12 +23,18 @@ fn registered_chat_key(chat_id: i64) -> String {
     format!("allrisbot:registered_chats:{chat_id}")
 }
 
+fn dialogue_key(chat_id: i64) -> String {
+    format!("allrisbot:dialogue:{chat_id}")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
     Redis(#[from] redis::RedisError),
     #[error("database timeout")]
     Timeout,
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -152,7 +160,7 @@ impl DatabaseConnection {
     async fn handle_error(&mut self, err: Error, deadline: Option<Instant>) -> Result<()> {
         let err = match err {
             Error::Redis(err) => err,
-            Error::Timeout => return Err(Error::Timeout),
+            e => return Err(e),
         };
         log::warn!("Database error: {err}");
 
@@ -227,7 +235,7 @@ macro_rules! implement_with_retry {
         $conn_struct_shared: ident;
         $(
             $(#[$attr:ident])?
-            $vis:vis async fn $fn_name:ident $(<$t:ident>)?
+            $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
             (
                 $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
             ) $(-> $return_type:ty)?
@@ -239,7 +247,7 @@ macro_rules! implement_with_retry {
             use super::*;
 
             $(
-                pub(super) async fn $fn_name $( <$t>)? (conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
+                pub(super) async fn $fn_name $( <$t $(: $bound)?>)? (conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
                     let request = async {
                         let $conn = conn.get_connection().await?;
                         Ok($body)
@@ -264,7 +272,7 @@ macro_rules! implement_with_retry {
         impl $conn_struct {
         $(
             #[allow(dead_code)]
-            $vis async fn $fn_name $(< $t >)?  (
+            $vis async fn $fn_name $(< $t $(: $bound)?>)?  (
                 &mut self,
                 $($param_name: $param_type),*
             ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
@@ -281,7 +289,7 @@ macro_rules! implement_with_retry {
         impl $conn_struct_shared {
             $(
                 #[allow(dead_code)]
-                $vis async fn $fn_name $(< $t >)?  (
+                $vis async fn $fn_name $(< $t $(: $bound)? >)?  (
                     &self,
                     $($param_name: $param_type),*
                 ) -> Result<implement_with_retry!(@ret $($return_type)?)>  {
@@ -330,7 +338,7 @@ implement_with_retry! {
         volfdnr: &str,
         message: &Message
     ) -> Option<String> {
-        let serialized = serde_json::to_string(message).map_err(RedisError::from)?;
+        let serialized = serde_json::to_string(message)?;
 
         script!("schedule_broadcast.lua")
             .key(SCHEDULED_MESSAGES_KEY)
@@ -417,8 +425,61 @@ implement_with_retry! {
         let content : Option<String> = connection.hget(registered_chat_key(chat_id), "filter").await?;
 
         match content {
-            Some(filter) => serde_json::from_str(&filter).map_err(RedisError::from)?,
+            Some(filter) => serde_json::from_str(&filter)?,
             None => vec![]
+        }
+    }
+
+    #[reset_connection_on_error]
+    pub async fn update_filter<T>(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>) -> T) -> T {
+        let key = registered_chat_key(chat_id);
+        let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
+
+        loop {
+            let ((), current_filters): ((), Option<String>) = redis::pipe()
+                .add_command(redis::cmd("WATCH").arg(&key).to_owned())
+                .add_command(Cmd::hget(&key, "filter"))
+                .query_async(connection)
+                .await?;
+
+            let mut filters = match &current_filters {
+                Some(filter) => serde_json::from_str(filter).unwrap_or_else(|e| {
+                    log::warn!("Couldn't deserialize filter: {e}");
+                    vec![]
+                }),
+                None => vec![]
+            };
+
+            let result = update(&mut filters);
+
+            let value: redis::Value = if filters.is_empty() {
+                if current_filters.is_some() {
+                    redis::pipe()
+                        .atomic()
+                        .add_command(Cmd::srem(REGISTERED_CHATS_KEY, chat_id))
+                        .add_command(Cmd::del(registered_chat_key(chat_id)))
+                        .query_async(connection)
+                        .await?
+                } else {
+                    // nothing has changed
+                    break result
+                }
+            } else {
+                let filter_str = serde_json::to_string(&filters)?;
+
+                let mut script = redis::cmd("EVAL");
+                script.arg(script_content).arg(3).arg(&[SCHEDULED_MESSAGES_KEY,REGISTERED_CHATS_KEY, &key]).arg(chat_id).arg(&filter_str);
+
+                redis::pipe()
+                    .atomic()
+                    .add_command(script)
+                    .query_async(connection)
+                    .await?
+            };
+
+            if !matches!(value, redis::Value::Nil) {
+                break result
+            }
         }
     }
 
@@ -479,6 +540,10 @@ implement_with_retry! {
             .and_then(|(_, v)| v.into_iter().next())
     }
 
+    pub async fn set_last_update(connection, timestamp: DateTime<Utc>) {
+        connection.set(LAST_UPDATE_KEY, timestamp.timestamp_millis()).await?
+    }
+
     pub async fn get_last_update(connection) -> Option<DateTime<Utc>> {
         if let Some(timestamp) = connection.get(LAST_UPDATE_KEY).await? {
             match DateTime::from_timestamp_millis(timestamp) {
@@ -500,60 +565,6 @@ implement_with_retry! {
         admin == Some(chat_id)
     }
 
-    pub async fn set_last_update(connection, timestamp: DateTime<Utc>) {
-        connection.set(LAST_UPDATE_KEY, timestamp.timestamp_millis()).await?
-    }
-
-    #[reset_connection_on_error]
-    pub async fn update_filter<T>(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>) -> T) -> T {
-        let key = registered_chat_key(chat_id);
-        let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
-
-        loop {
-            let ((), current_filters): ((), Option<String>) = redis::pipe()
-                .add_command(redis::cmd("WATCH").arg(&key).to_owned())
-                .add_command(Cmd::hget(&key, "filter"))
-                .query_async(connection)
-                .await?;
-
-            let mut filters = match &current_filters {
-                Some(filter) => serde_json::from_str(filter).map_err(RedisError::from)?,
-                None => vec![]
-            };
-
-            let result = update(&mut filters);
-
-            let value: redis::Value = if filters.is_empty() {
-                if current_filters.is_some() {
-                    redis::pipe()
-                        .atomic()
-                        .add_command(Cmd::srem(REGISTERED_CHATS_KEY, chat_id))
-                        .add_command(Cmd::del(registered_chat_key(chat_id)))
-                        .query_async(connection)
-                        .await?
-                } else {
-                    // nothing has changed
-                    break result
-                }
-            } else {
-                let filter_str = serde_json::to_string(&filters).map_err(RedisError::from)?;
-
-                let mut script = redis::cmd("EVAL");
-                script.arg(script_content).arg(3).arg(&[SCHEDULED_MESSAGES_KEY,REGISTERED_CHATS_KEY, &key]).arg(chat_id).arg(&filter_str);
-
-                redis::pipe()
-                    .atomic()
-                    .add_command(script)
-                    .query_async(connection)
-                    .await?
-            };
-
-            if !matches!(value, redis::Value::Nil) {
-                break result
-            }
-        }
-    }
-
     pub async fn get_chat_state(
         connection,
         chat_id: i64,
@@ -566,6 +577,25 @@ implement_with_retry! {
             ChatState::Migrated { to }
         } else {
             ChatState::Stopped
+        }
+    }
+
+    pub async fn update_dialogue(connection, chat_id: i64, dialogue: &impl Serialize) {
+        let string = serde_json::to_string(dialogue)?;
+        connection.set_ex(dialogue_key(chat_id), &string, 60 * 60 * 24).await?
+    }
+
+    pub async fn remove_dialogue(connection, chat_id: i64) {
+        connection.del(dialogue_key(chat_id)).await?
+    }
+
+    pub async fn get_dialogue<D: DeserializeOwned>(connection, chat_id: i64) -> Option<D> {
+        let string : Option<String> = connection.get(dialogue_key(chat_id)).await?;
+        if let Some(string) = string {
+            let deserialized = serde_json::from_str(&string)?;
+            Some(deserialized)
+        } else {
+            None
         }
     }
 
