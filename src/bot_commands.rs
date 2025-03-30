@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use teloxide::dispatching::ShutdownToken;
 use teloxide::dispatching::dialogue::Storage;
 use teloxide::prelude::*;
-use teloxide::types::{KeyboardButton, KeyboardMarkup, Me, ReplyMarkup};
+use teloxide::types::{
+    ButtonRequest, ChatAdministratorRights, KeyboardButton, KeyboardButtonRequestChat,
+    KeyboardMarkup, Me, ReplyMarkup, RequestId,
+};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
 
@@ -33,6 +36,8 @@ enum Command {
     DeleteFilter,
     #[command(description = "alle Filterregeln löschen.")]
     DeleteAllFilters,
+    #[command(description = "Einstellungen für einen Channel bearbeiten")]
+    ManageChannel,
     #[command(description = "zeige diesen Text.")]
     Help,
     #[command(hide)]
@@ -82,6 +87,9 @@ where
 pub enum State {
     #[default]
     Start,
+    ReceiveChannelSelection {
+        request_id: RequestId,
+    },
     ReceivingTag {
         previous_conditions: Vec<Condition>,
     },
@@ -97,7 +105,13 @@ pub enum State {
     DeletingFilter,
 }
 
-type FilterDialogue = Dialogue<State, Context>;
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct StateWithChannel {
+    channel: Option<ChatId>,
+    state: State,
+}
+
+type FilterDialogue = Dialogue<StateWithChannel, Context>;
 type HandlerResult = Result<(), HandlerError>;
 
 fn tag_keyboard() -> ReplyMarkup {
@@ -142,12 +156,13 @@ async fn handle_message(
     bot: Bot,
     me: Me,
     dialogue: FilterDialogue,
-    state: State,
+    state: StateWithChannel,
     msg: Message,
     context: Arc<Context>,
 ) -> HandlerResult {
     let bot2 = bot.clone();
     let chat_id = msg.chat.id;
+    let channel = state.channel;
 
     let result = async {
         if let Some(new_chat_id) = msg.migrate_to_chat_id() {
@@ -169,7 +184,7 @@ async fn handle_message(
             .and_then(|text| Command::parse(text, me.username()).ok());
 
         if matches!(command, Some(Command::Cancel)) {
-            let message = if matches!(state, State::Start) {
+            let message = if matches!(state.state, State::Start) {
                 "Kein Befehl aktiv ..."
             } else {
                 "Befehl wurde abgebrochen!"
@@ -179,25 +194,41 @@ async fn handle_message(
             return Ok(());
         }
 
-        match state {
+        match state.state {
             State::Start => {
                 if let Some(command) = command {
-                    handle_command(&bot, &dialogue, &msg, &command, &context).await?;
+                    handle_command(&bot, &dialogue, &msg, &command, &context, channel).await?;
                 }
             }
             State::ReceivingTag {
                 previous_conditions,
-            } => receive_tag(bot, context, dialogue, previous_conditions, msg).await?,
+            } => receive_tag(bot, context, dialogue, previous_conditions, msg, channel).await?,
             State::ReceivingNegation {
                 previous_conditions,
                 tag,
-            } => receive_negation(bot, dialogue, previous_conditions, tag, msg).await?,
+            } => receive_negation(bot, dialogue, previous_conditions, tag, msg, channel).await?,
             State::ReceivingPattern {
                 previous_conditions,
                 tag,
                 negation,
-            } => receive_pattern(bot, dialogue, previous_conditions, tag, negation, msg).await?,
-            State::DeletingFilter => delete_filter(&bot, &dialogue, &msg, &context).await?,
+            } => {
+                receive_pattern(
+                    bot,
+                    dialogue,
+                    previous_conditions,
+                    tag,
+                    negation,
+                    msg,
+                    channel,
+                )
+                .await?
+            }
+            State::DeletingFilter => {
+                delete_filter(&bot, &dialogue, &msg, &context, channel).await?
+            }
+            State::ReceiveChannelSelection { request_id } => {
+                receive_channel_selection(&bot, &dialogue, &msg, request_id).await?
+            }
         };
 
         Ok(())
@@ -229,16 +260,20 @@ async fn handle_command(
     msg: &Message,
     command: &Command,
     context: &Context,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
     match command {
-        Command::AddFilter => add_filter(bot, dialogue, msg).await?,
-        Command::ListFilters => list_filters(bot, msg, context).await?,
-        Command::DeleteFilter => start_delete_filter(bot, msg, context, dialogue).await?,
-        Command::DeleteAllFilters => delete_all_filters(bot, msg, context).await?,
+        Command::AddFilter => add_filter(bot, dialogue, msg, channel).await?,
+        Command::ListFilters => list_filters(bot, msg, context, dialogue, channel).await?,
+        Command::DeleteFilter => start_delete_filter(bot, msg, context, dialogue, channel).await?,
+        Command::DeleteAllFilters => {
+            delete_all_filters(bot, msg, context, dialogue, channel).await?
+        }
         Command::Help => help(bot, msg).await?,
         Command::Admin(token) => admin(bot, msg, context, token).await?,
-        Command::Cancel => unreachable!(),
+        Command::Cancel => (),
         Command::ScanDay(date) => scan_day(bot, msg, context, date).await?,
+        Command::ManageChannel => manage_channel(bot, msg, dialogue).await?,
     }
 
     Ok(())
@@ -255,6 +290,97 @@ macro_rules! check_admin_permission {
             return Ok(());
         }
     };
+}
+
+macro_rules! user_or_channel_checked {
+    ($bot:expr, $user:expr, $channel:expr, $dialogue:expr) => {
+        if let Some(channel) = $channel {
+            if !$bot
+                .get_chat_administrators(channel)
+                .await?
+                .iter()
+                .any(|admin| admin.user.id == $user)
+            {
+                $bot.send_message(
+                    $user,
+                    "Du hast keine Admin-Rechte in diesem Channel, Abbruch!",
+                )
+                .await?;
+                $dialogue.reset().await?;
+                return Ok(());
+            }
+            channel
+        } else {
+            $user
+        }
+        .0
+    };
+}
+
+async fn manage_channel(
+    bot: &Bot,
+    msg: &Message,
+    dialogue: &FilterDialogue,
+) -> HandlerResult {
+    if !msg.chat.is_private() {
+        return Ok(());
+    }
+
+    let request_id = RequestId(msg.id.0);
+    let button = KeyboardButtonRequestChat::new(request_id, true)
+        .user_administrator_rights(ChatAdministratorRights {
+            is_anonymous: false,
+            can_manage_chat: false,
+            can_delete_messages: false,
+            can_manage_video_chats: false,
+            can_restrict_members: false,
+            can_promote_members: false,
+            can_change_info: false,
+            can_invite_users: true,
+            can_post_messages: Some(true),
+            can_edit_messages: None,
+            can_pin_messages: None,
+            can_post_stories: None,
+            can_edit_stories: None,
+            can_delete_stories: None,
+            can_manage_topics: None,
+        })
+        .bot_administrator_rights(ChatAdministratorRights {
+            is_anonymous: false,
+            can_manage_chat: false,
+            can_delete_messages: false,
+            can_manage_video_chats: false,
+            can_restrict_members: false,
+            can_promote_members: false,
+            can_change_info: false,
+            can_invite_users: false,
+            can_post_messages: Some(true),
+            can_edit_messages: None,
+            can_pin_messages: None,
+            can_post_stories: None,
+            can_edit_stories: None,
+            can_delete_stories: None,
+            can_manage_topics: None,
+        })
+        .request_title();
+
+    let button =
+        KeyboardButton::new("Channel auswählen").request(ButtonRequest::RequestChat(button));
+    let keyboard = KeyboardMarkup::new(vec![vec![button]])
+        .one_time_keyboard()
+        .resize_keyboard();
+
+    dialogue
+        .update(StateWithChannel {
+            channel: None,
+            state: State::ReceiveChannelSelection { request_id },
+        })
+        .await?;
+    bot.send_message(msg.chat.id, "Bitte wähle einen Channel aus.")
+        .reply_markup(keyboard)
+        .await?;
+
+    Ok(())
 }
 
 async fn scan_day(bot: &Bot, msg: &Message, context: &Context, date: &NaiveDate) -> HandlerResult {
@@ -278,7 +404,10 @@ async fn delete_filter(
     dialogue: &FilterDialogue,
     msg: &Message,
     context: &Context,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
+    let chat_id = user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+
     dialogue.exit().await?;
 
     let index = msg
@@ -298,7 +427,7 @@ async fn delete_filter(
 
     let removed = context
         .database
-        .update_filter(msg.chat.id.0, &|filters| {
+        .update_filter(chat_id, &|filters| {
             let valid = index < filters.len();
             filters.remove(index);
             valid
@@ -316,9 +445,18 @@ async fn delete_filter(
     Ok(())
 }
 
-async fn list_filters(bot: &Bot, msg: &Message, context: &Context) -> HandlerResult {
+async fn list_filters(
+    bot: &Bot,
+    msg: &Message,
+    context: &Context,
+    dialogue: &FilterDialogue,
+    channel: Option<ChatId>,
+) -> HandlerResult {
     use std::fmt::Write;
-    let filters = context.database.get_filters(msg.chat.id.0).await?;
+
+    let chat_id = user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+
+    let filters = context.database.get_filters(chat_id).await?;
     let mut response = String::new();
 
     if filters.is_empty() {
@@ -340,15 +478,23 @@ async fn start_delete_filter(
     msg: &Message,
     context: &Context,
     dialogue: &FilterDialogue,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
     use std::fmt::Write;
-    let filters = context.database.get_filters(msg.chat.id.0).await?;
+
+    let chat_id = user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+    let filters = context.database.get_filters(chat_id).await?;
     let mut response = String::new();
 
     if filters.is_empty() {
         response += "Zur Zeit sind keine Filter aktiv.";
     } else {
-        dialogue.update(State::DeletingFilter).await?;
+        dialogue
+            .update(StateWithChannel {
+                state: State::DeletingFilter,
+                channel,
+            })
+            .await?;
 
         response += "Wähle einen der folgenden Filter zum Löschen:\n\n";
         for (i, filter) in filters.iter().enumerate() {
@@ -370,10 +516,20 @@ async fn start_delete_filter(
     Ok(())
 }
 
-async fn add_filter(bot: &Bot, dialogue: &FilterDialogue, msg: &Message) -> HandlerResult {
+async fn add_filter(
+    bot: &Bot,
+    dialogue: &FilterDialogue,
+    msg: &Message,
+    channel: Option<ChatId>,
+) -> HandlerResult {
+    user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+
     dialogue
-        .update(State::ReceivingTag {
-            previous_conditions: vec![],
+        .update(StateWithChannel {
+            channel,
+            state: State::ReceivingTag {
+                previous_conditions: vec![],
+            },
         })
         .await?;
     let text = "Lass uns einen Filter einrichten! Du kannst den Filter auch sofort speichern, um alle Vorlagen einzuschließen.\n\nBitte gib den ersten Tag ein:";
@@ -400,8 +556,15 @@ async fn admin(bot: &Bot, msg: &Message, context: &Context, token: &str) -> Hand
     Ok(())
 }
 
-async fn delete_all_filters(bot: &Bot, msg: &Message, context: &Context) -> HandlerResult {
-    let removed = context.database.remove_subscription(msg.chat.id.0).await?;
+async fn delete_all_filters(
+    bot: &Bot,
+    msg: &Message,
+    context: &Context,
+    dialogue: &FilterDialogue,
+    channel: Option<ChatId>,
+) -> HandlerResult {
+    let chat_id = user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+    let removed = context.database.remove_subscription(chat_id).await?;
     let message = if removed {
         "Deine Filter wurden entfernt."
     } else {
@@ -411,19 +574,53 @@ async fn delete_all_filters(bot: &Bot, msg: &Message, context: &Context) -> Hand
     Ok(())
 }
 
+async fn receive_channel_selection(
+    bot: &Bot,
+    dialogue: &FilterDialogue,
+    msg: &Message,
+    request_id: RequestId,
+) -> HandlerResult {
+    let Some(shared) = msg.shared_chat() else {
+        return Ok(());
+    };
+
+    if shared.request_id != request_id {
+        return Ok(());
+    }
+
+    let text = if let Some(title) = &shared.title {
+        format!("Channel „{title}” wurde ausgewählt!")
+    } else {
+        "Channel wurde ausgewählt!".to_string()
+    };
+
+    dialogue
+        .update(StateWithChannel {
+            channel: Some(shared.chat_id),
+            state: State::Start,
+        })
+        .await?;
+    bot.send_message(msg.chat.id, text).await?;
+
+    Ok(())
+}
+
 async fn receive_tag(
     bot: Bot,
     context: Arc<Context>,
     dialogue: FilterDialogue,
     previous_conditions: Vec<Condition>,
     msg: Message,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
     if let Some(tag_text) = msg.text() {
         let tag = match tag_text {
             "Speichern" => {
+                let chat_id = user_or_channel_checked!(bot, msg.chat.id, channel, dialogue);
+
                 context
                     .database
-                    .update_filter(msg.chat.id.0, &|filters| {
+                    .update_filter(chat_id, &|filters| {
                         filters.push(Filter {
                             conditions: previous_conditions.clone(),
                         })
@@ -451,9 +648,12 @@ async fn receive_tag(
             .reply_markup(negation_keyboard())
             .await?;
         dialogue
-            .update(State::ReceivingNegation {
-                previous_conditions,
-                tag,
+            .update(StateWithChannel {
+                channel,
+                state: State::ReceivingNegation {
+                    previous_conditions,
+                    tag,
+                },
             })
             .await?;
     }
@@ -466,13 +666,17 @@ async fn receive_negation(
     previous_conditions: Vec<Condition>,
     tag: Tag,
     msg: Message,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
     let negation = matches!(msg.text(), Some("Wenn das Pattern nicht zutrifft"));
     dialogue
-        .update(State::ReceivingPattern {
-            previous_conditions,
-            tag,
-            negation,
+        .update(StateWithChannel {
+            state: State::ReceivingPattern {
+                previous_conditions,
+                tag,
+                negation,
+            },
+            channel,
         })
         .await?;
     bot.send_message(msg.chat.id, "Gib nun ein Regex-Pattern ein.")
@@ -483,11 +687,11 @@ async fn receive_negation(
 async fn receive_pattern(
     bot: Bot,
     dialogue: FilterDialogue,
-
     mut previous_conditions: Vec<Condition>,
     tag: Tag,
     negate: bool,
     msg: Message,
+    channel: Option<ChatId>,
 ) -> HandlerResult {
     if let Some(pattern) = msg.text() {
         match Regex::new(pattern) {
@@ -504,8 +708,11 @@ async fn receive_pattern(
                     }
                 );
                 dialogue
-                    .update(State::ReceivingTag {
-                        previous_conditions,
+                    .update(StateWithChannel {
+                        state: State::ReceivingTag {
+                            previous_conditions,
+                        },
+                        channel,
                     })
                     .await?;
                 bot.send_message(msg.chat.id, text)
@@ -542,7 +749,7 @@ fn create(
     });
 
     let handler = Update::filter_message()
-        .enter_dialogue::<Message, Context, State>()
+        .enter_dialogue::<Message, Context, StateWithChannel>()
         .endpoint(handle_message);
 
     Dispatcher::builder(bot, handler)
