@@ -5,6 +5,7 @@ mod broadcasting;
 mod database;
 mod types;
 
+use std::error::Error;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -12,12 +13,14 @@ use admin::AdminToken;
 use broadcasting::broadcast_task;
 use clap::Parser;
 use redis::{ConnectionInfo, IntoConnectionInfo};
-use teloxide::{adaptors::CacheMe, prelude::RequesterExt};
+use teloxide::adaptors::CacheMe;
+use teloxide::prelude::RequesterExt;
 use tokio::sync::mpsc;
+use url::Url;
 
 use crate::allris::AllrisUrl;
 
-type Bot =  CacheMe<teloxide::Bot>;
+type Bot = CacheMe<teloxide::Bot>;
 
 /// Telegram bot that notifies about newly published documents in the Allris 4 council information system.
 #[derive(Parser)]
@@ -39,7 +42,7 @@ struct Args {
         long,
         value_name = "URL",
         env = "REDIS_URL",
-        value_parser = |s: &str| s.into_connection_info(),
+        value_parser = parse_redis_url,
         default_value = "redis://127.0.0.1"
     )]
     redis_url: ConnectionInfo,
@@ -73,6 +76,15 @@ struct Args {
     /// disable logging
     #[arg(short, long, conflicts_with = "verbose")]
     quiet: bool,
+}
+
+fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
+    let url = Url::parse(input).map_err(|e| e.to_string())?;
+    let info = url.into_connection_info().map_err(
+        #[allow(deprecated)]
+        |e| e.description().to_string(),
+    )?;
+    Ok(info)
 }
 
 fn init_logging(args: &Args) {

@@ -317,11 +317,7 @@ macro_rules! user_or_channel_checked {
     };
 }
 
-async fn manage_channel(
-    bot: &Bot,
-    msg: &Message,
-    dialogue: &FilterDialogue,
-) -> HandlerResult {
+async fn manage_channel(bot: &Bot, msg: &Message, dialogue: &FilterDialogue) -> HandlerResult {
     if !msg.chat.is_private() {
         return Ok(());
     }
@@ -362,7 +358,7 @@ async fn manage_channel(
             can_delete_stories: None,
             can_manage_topics: None,
         });
-        // TODO (later version of teloxide): request_title = true
+    // TODO (later version of teloxide): request_title = true
 
     let button =
         KeyboardButton::new("Channel auswählen").request(ButtonRequest::RequestChat(button));
@@ -737,10 +733,7 @@ fn create(
     allris_url: AllrisUrl,
     admin_token: Option<AdminToken>,
 ) -> Dispatcher<Bot, HandlerError, teloxide::dispatching::DefaultKey> {
-    let connection = SharedDatabaseConnection::new(DatabaseConnection::new(
-        client,
-        Some(Duration::from_secs(6)),
-    ));
+    let connection = DatabaseConnection::new(client, Some(Duration::from_secs(6))).shared();
 
     let context = Arc::new(Context {
         database: connection,

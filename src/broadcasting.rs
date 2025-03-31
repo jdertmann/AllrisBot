@@ -44,7 +44,6 @@ enum WorkerResult {
     Processed(StreamId),
     OutOfSync,
     ChatStopped,
-    InvalidToken,
     ShuttingDown,
     MigratedTo(ChatId),
 }
@@ -58,13 +57,14 @@ fn delay(chat_id: ChatId) -> Duration {
 }
 
 type OneshotResponse = (database::Result<WorkerResult>, bool);
+type SendMessage = (MessageSender, oneshot::Sender<OneshotResponse>);
 
 struct BroadcastResources {
     bot: crate::Bot,
     db: SharedDatabaseConnection,
     hard_shutdown: watch::Sender<bool>,
     next_message_cache: Cache<StreamId, (StreamId, Message), Lru<StreamId>>,
-    sender_tx: mpsc::Sender<(MessageSender, oneshot::Sender<OneshotResponse>)>,
+    sender_tx: mpsc::Sender<SendMessage>,
 }
 
 impl BroadcastResources {
@@ -111,10 +111,7 @@ impl BroadcastResources {
         }
     }
 
-    async fn sender_task(
-        self: Arc<Self>,
-        mut sender_rx: mpsc::Receiver<(MessageSender, oneshot::Sender<OneshotResponse>)>,
-    ) {
+    async fn sender_task(self: Arc<Self>, mut sender_rx: mpsc::Receiver<SendMessage>) {
         let mut shutdown = self.hard_shutdown.subscribe();
         let mut interval = interval(Duration::from_secs_f32(1. / BROADCASTS_PER_SECOND));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -126,6 +123,7 @@ impl BroadcastResources {
             };
 
             let (sender, result_tx) = tokio::select! {
+                biased;
                 _ = shutdown.wait_for(|x| *x) => break,
                 next = recv => match next {
                     Some(next) => next,
@@ -158,8 +156,6 @@ struct BroadcastManager<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> {
     processing: FuturesUnordered<Fut>,
 }
 
-struct InvalidToken;
-
 impl<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> BroadcastManager<'a, Fut, F> {
     fn trigger_chat(&mut self, chat_id: ChatId) {
         match self.states.entry(chat_id) {
@@ -182,11 +178,7 @@ impl<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> BroadcastManager<'a,
         }
     }
 
-    fn on_processing_finished(
-        &mut self,
-        chat_id: ChatId,
-        result: database::Result<WorkerResult>,
-    ) -> Result<(), InvalidToken> {
+    fn on_processing_finished(&mut self, chat_id: ChatId, result: database::Result<WorkerResult>) {
         let restart = self.states.remove(&chat_id).unwrap().should_restart;
         match result {
             Ok(WorkerResult::Processed(stream_id)) => {
@@ -202,11 +194,8 @@ impl<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> BroadcastManager<'a,
             }
             Ok(WorkerResult::MigratedTo(chat_id)) => self.trigger_chat(chat_id),
             Ok(WorkerResult::ShuttingDown) => (),
-            Ok(WorkerResult::InvalidToken) => return Err(InvalidToken),
             Err(e) => log::error!("Database error: {e}"),
         }
-
-        Ok(())
     }
 
     fn next_message_ready(
@@ -243,23 +232,21 @@ pub async fn broadcast_task(
     db: redis::Client,
     mut shutdown_rx: mpsc::UnboundedReceiver<ShutdownSignal>,
 ) {
-    let conn = DatabaseConnection::new(db.clone(), None);
-
     let (sender_tx, sender_rx) = mpsc::channel(3);
 
     let resources = Arc::new(BroadcastResources {
         bot,
         sender_tx,
-        db: SharedDatabaseConnection::new(conn),
+        db: DatabaseConnection::new(db.clone(), None).shared(),
         hard_shutdown: watch::Sender::new(false),
         next_message_cache: Cache::new(Lru::new(15)),
     });
 
-    let sender_handle = tokio::spawn(resources.clone().sender_task(sender_rx));
+    let mut sender_handle = tokio::spawn(resources.clone().sender_task(sender_rx));
 
     let mut soft_shutdown = false;
 
-    let mut cx = BroadcastManager {
+    let mut manager = BroadcastManager {
         resources: &resources,
         latest_entry_id: None,
         states: HashMap::new(),
@@ -271,11 +258,12 @@ pub async fn broadcast_task(
     };
 
     let conn = DatabaseConnection::new(db, None);
-    let mut next_message_ready = pin!(cx.next_message_ready(conn, false));
+    let mut next_message_ready = pin!(manager.next_message_ready(conn, false));
 
-    while !(soft_shutdown && cx.processing.is_empty()) {
+    while !(soft_shutdown && manager.processing.is_empty()) {
         tokio::select! {
             biased;
+            _ = &mut sender_handle => return,
             signal = shutdown_rx.recv() => match signal {
                 Some(ShutdownSignal::Soft) => soft_shutdown = true,
                 Some(ShutdownSignal::Hard) | None => break
@@ -284,17 +272,14 @@ pub async fn broadcast_task(
                 let was_error = result.is_err();
 
                 match result {
-                    Ok((id, active_chats)) => cx.on_message_scheduled(id, active_chats),
+                    Ok((id, active_chats)) => manager.on_message_scheduled(id, active_chats),
                     Err(e) => log::error!("Database error: {e}")
                 };
 
-                next_message_ready.set(cx.next_message_ready(conn, was_error));
+                next_message_ready.set(manager.next_message_ready(conn, was_error));
             },
-            Some(result) = cx.processing.next(), if !cx.processing.is_empty() => {
-                if cx.on_processing_finished(result.0, result.1).is_err() {
-                    log::error!("Bot token invalid, aborting!");
-                    return
-                }
+            Some(result) = manager.processing.next(), if !manager.processing.is_empty() => {
+                manager.on_processing_finished(result.0, result.1);
             }
         }
     }

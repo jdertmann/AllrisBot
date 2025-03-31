@@ -147,6 +147,13 @@ impl DatabaseConnection {
         Ok(this)
     }
 
+    pub fn shared(self) -> SharedDatabaseConnection {
+        SharedDatabaseConnection {
+            timeout: self.timeout,
+            connection: Mutex::new(self),
+        }
+    }
+
     async fn get_connection(&mut self) -> Result<&mut MultiplexedConnection> {
         if self.connection.is_some() {
             Ok(self.connection.as_mut().unwrap())
@@ -204,16 +211,6 @@ impl DatabaseConnection {
 pub struct SharedDatabaseConnection {
     connection: Mutex<DatabaseConnection>,
     timeout: Option<Duration>,
-}
-
-impl SharedDatabaseConnection {
-    pub fn new(connection: DatabaseConnection) -> Self {
-        let timeout = connection.timeout;
-        Self {
-            connection: Mutex::new(connection),
-            timeout,
-        }
-    }
 }
 
 async fn timeout_at<T>(

@@ -108,7 +108,11 @@ impl MessageSender {
                 shared.db.remove_subscription(self.chat_id).await?;
                 WorkerResult::ChatStopped
             }
-            Err(RequestError::Api(ApiError::InvalidToken)) => WorkerResult::InvalidToken,
+            Err(RequestError::Api(ApiError::InvalidToken)) => {
+                log::error!("Invalid token! Was it revoked?");
+                shared.hard_shutdown.send_replace(true);
+                WorkerResult::ShuttingDown
+            }
             Err(RequestError::MigrateToChatId(new_chat_id)) => {
                 self.unacknowledge_message(shared).await?;
                 shared.db.migrate_chat(self.chat_id, new_chat_id.0).await?;
