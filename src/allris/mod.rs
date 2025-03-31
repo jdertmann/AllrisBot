@@ -18,7 +18,7 @@ use tokio_retry::strategy::ExponentialBackoff;
 use url::Url;
 
 use self::html::{WebsiteData, scrape_website};
-use crate::database::{self, DatabaseConnection, SharedDatabaseConnection};
+use crate::database::{self, DatabaseConnection};
 use crate::types::{Message, Tag};
 
 #[derive(Debug, Error)]
@@ -202,17 +202,17 @@ async fn send_notifications(
 
 pub async fn scan_day(
     allris_url: &AllrisUrl,
-    db: &SharedDatabaseConnection,
+    db: &mut DatabaseConnection,
     day: NaiveDate,
 ) -> Result<(), Error> {
     let http_client = reqwest::Client::new();
     let papers = oparl::get_day(&http_client, allris_url, day);
-    send_notifications(&mut db.get_dedicated().await?, http_client, papers).await
+    send_notifications(db, http_client, papers).await
 }
 
 pub async fn do_update(
     allris_url: &AllrisUrl,
-    mut db_conn: DatabaseConnection,
+    db_conn: &mut DatabaseConnection,
 ) -> Result<(), Error> {
     let Some(last_updated) = db_conn.get_last_update().await? else {
         // the very first invocation :) save the timestamp but do nothing yet
@@ -223,7 +223,7 @@ pub async fn do_update(
     let update_started = Utc::now();
     let http_client = reqwest::Client::new();
     let papers = oparl::get_update(&http_client, allris_url, last_updated);
-    send_notifications(&mut db_conn, http_client, papers).await?;
+    send_notifications(db_conn, http_client, papers).await?;
     db_conn.set_last_update(update_started).await?;
 
     Ok(())
@@ -257,8 +257,8 @@ pub async fn scraper(allris_url: AllrisUrl, update_interval: Duration, db: redis
         interval.tick().await;
 
         log::info!("Updating ...");
-        let db_conn = DatabaseConnection::new(db.clone(), db_timeout);
-        match do_update(&allris_url, db_conn).await {
+        let mut db_conn = DatabaseConnection::new(db.clone(), db_timeout);
+        match do_update(&allris_url, &mut db_conn).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }

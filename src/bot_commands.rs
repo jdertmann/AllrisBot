@@ -45,6 +45,8 @@ enum Command {
     #[command(hide)]
     Admin(String),
     #[command(hide)]
+    ForceUpdate,
+    #[command(hide)]
     ScanDay(chrono::NaiveDate),
 }
 
@@ -274,6 +276,7 @@ async fn handle_command(
         Command::Cancel => (),
         Command::ScanDay(date) => scan_day(bot, msg, context, date).await?,
         Command::ManageChannel => manage_channel(bot, msg, dialogue).await?,
+        Command::ForceUpdate => force_update(bot, msg, context).await?,
     }
 
     Ok(())
@@ -382,10 +385,29 @@ async fn manage_channel(bot: &Bot, msg: &Message, dialogue: &FilterDialogue) -> 
 async fn scan_day(bot: &Bot, msg: &Message, context: &Context, date: &NaiveDate) -> HandlerResult {
     check_admin_permission!(context.database, msg.chat);
 
-    let message = match allris::scan_day(&context.allris_url, &context.database, *date).await {
+    let mut db = context.database.get_dedicated().await?;
+
+    let message = match allris::scan_day(&context.allris_url, &mut db, *date).await {
         Ok(()) => "OK!",
         Err(e) => {
-            log::error!("Error while scanning day: {e}");
+            log::error!("Update failed: {e}");
+            "Ein Fehler ist aufgetreten. Schau im Log nach!"
+        }
+    };
+
+    bot.send_message(msg.chat.id, message).await?;
+
+    Ok(())
+}
+
+async fn force_update(bot: &Bot, msg: &Message, context: &Context) -> HandlerResult {
+    check_admin_permission!(context.database, msg.chat);
+
+    let mut db = context.database.get_dedicated().await?;
+    let message = match allris::do_update(&context.allris_url, &mut db).await {
+        Ok(()) => "OK!",
+        Err(e) => {
+            log::error!("Update failed: {e}");
             "Ein Fehler ist aufgetreten. Schau im Log nach!"
         }
     };
