@@ -150,6 +150,7 @@ impl DatabaseConnection {
     pub fn shared(self) -> SharedDatabaseConnection {
         SharedDatabaseConnection {
             timeout: self.timeout,
+            client: self.client.clone(),
             connection: Mutex::new(self),
         }
     }
@@ -211,6 +212,13 @@ impl DatabaseConnection {
 pub struct SharedDatabaseConnection {
     connection: Mutex<DatabaseConnection>,
     timeout: Option<Duration>,
+    client: Client,
+}
+
+impl SharedDatabaseConnection {
+    pub async fn get_dedicated(&self) -> Result<DatabaseConnection> {
+        DatabaseConnection::connect(self.client.clone(), self.timeout).await
+    }
 }
 
 async fn timeout_at<T>(

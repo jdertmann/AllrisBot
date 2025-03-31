@@ -1,10 +1,18 @@
-use chrono::{DateTime, Days, Local, NaiveDate, SecondsFormat, TimeZone, Utc};
+use std::future::ready;
+
+use chrono::{DateTime, Days, NaiveDate, SecondsFormat, TimeZone, Utc};
+use chrono_tz::Europe;
+use futures_util::{Stream, TryStreamExt};
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use super::{AllrisUrl, Error};
 use crate::allris::http_request;
+
+const LOCAL_TZ: chrono_tz::Tz = Europe::Berlin;
 
 /*
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,86 +57,107 @@ struct Links {
     next: Option<Url>,
 }
 
-pub async fn get_day(
+fn to_rfc3339(t: DateTime<impl TimeZone>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, false)
+}
+
+fn endpoint_url<T: TimeZone>(
+    url: &AllrisUrl,
+    since: DateTime<T>,
+    until: Option<DateTime<T>>,
+) -> Url {
+    let mut url = url.url.join("oparl/papers").unwrap();
+
+    {
+        let mut query_pairs = url.query_pairs_mut();
+        query_pairs.append_pair("omit_internal", "true");
+        query_pairs.append_pair("modified_since", &to_rfc3339(since));
+        if let Some(until) = until {
+            query_pairs.append_pair("modified_until", &to_rfc3339(until));
+        }
+    }
+
+    url
+}
+
+fn get_papers(
+    client: reqwest::Client,
+    url: Url,
+) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
+    let (tx, rx) = mpsc::channel::<Result<Vec<Paper>, Error>>(20);
+
+    tokio::spawn(async move {
+        let mut next_url = Some(url);
+
+        while let Some(url) = next_url {
+            log::info!("Retrieving {url} ...");
+            match http_request::<Papers, _>(&client, &url, Response::json).await {
+                Ok(content) => {
+                    if tx.send(Ok(content.data)).await.is_err() {
+                        return;
+                    }
+                    next_url = content.links.next;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.into())).await;
+                    return;
+                }
+            }
+        }
+    });
+
+    ReceiverStream::new(rx)
+        .map_ok(|vec| futures_util::stream::iter(vec.into_iter().map(Ok)))
+        .try_flatten()
+}
+
+pub fn get_day(
     client: &reqwest::Client,
     url: &AllrisUrl,
     day: NaiveDate,
-) -> Result<Vec<Paper>, Error> {
-    let start = Local
+) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
+    let start = LOCAL_TZ
         .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap();
-    let end = Local
-        .from_local_datetime(&(day + Days::new(1)).and_hms_opt(0, 0, 0).unwrap())
-        .unwrap();
+        .single()
+        .expect("no DST transition at midnight");
 
-    let mut url = url.url.join("oparl/papers")?;
-    url.query_pairs_mut()
-        .append_pair(
-            "modified_since",
-            &start.to_rfc3339_opts(SecondsFormat::Secs, true),
-        )
-        .append_pair(
-            "modified_until",
-            &end.to_rfc3339_opts(SecondsFormat::Secs, true),
-        )
-        .append_pair("omit_internal", "true");
+    let end = LOCAL_TZ
+        .from_local_datetime(&day.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .expect("no DST transition at midnight");
 
-    let mut next_url = Some(url);
-    let mut papers = vec![];
+    let url = endpoint_url(url, start, Some(end));
 
-    while let Some(url) = next_url {
-        log::info!("Retrieving {url} ...");
-        let content: Papers = http_request(client, &url, Response::json).await?;
-        papers.extend(
-            content
-                .data
-                .into_iter()
-                .filter(|paper| !paper.deleted && paper.date == Some(day)),
-        );
-        next_url = content.links.next;
-    }
-
-    Ok(papers)
+    get_papers(client.clone(), url)
+        .try_filter(move |paper| ready(!paper.deleted && paper.date == Some(day)))
 }
 
-pub async fn get_update(
+pub fn get_update(
     client: &reqwest::Client,
     url: &AllrisUrl,
     since: DateTime<Utc>,
-) -> Result<Vec<Paper>, Error> {
-    let timestamp = since.to_rfc3339_opts(SecondsFormat::Secs, true);
-
+) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
     // there are sometimes old papers included. we don't want them
     let oldest_date = (since - Days::new(2)).date_naive();
-    let mut url = url.url.join("oparl/papers")?;
-    url.query_pairs_mut()
-        .append_pair("modified_since", &timestamp)
-        .append_pair("omit_internal", "true");
-
-    let mut next_url = Some(url);
-    let mut papers = vec![];
-
-    while let Some(url) = next_url {
-        log::info!("Retrieving {url} ...");
-        let content: Papers = http_request(client, &url, Response::json).await?;
-        papers.extend(
-            content
-                .data
-                .into_iter()
-                .filter(|paper| !paper.deleted && paper.date >= Some(oldest_date)),
-        );
-        next_url = content.links.next;
-    }
-
-    Ok(papers)
+    let url = endpoint_url(url, since, None);
+    get_papers(client.clone(), url)
+        .try_filter(move |paper| ready(!paper.deleted && paper.date >= Some(oldest_date)))
 }
 
-#[tokio::test]
-async fn test_get_update() {
-    use chrono::Days;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let url = AllrisUrl::parse("https://www.bonn.sitzung-online.de/").unwrap();
-    get_update(&reqwest::Client::new(), &url, Utc::now() - Days::new(2))
-        .await
-        .unwrap();
+    #[tokio::test]
+    async fn test_get_update() {
+        use chrono::Days;
+        use futures_util::StreamExt;
+
+        let url = AllrisUrl::parse("https://www.bonn.sitzung-online.de/").unwrap();
+        let mut update = get_update(&reqwest::Client::new(), &url, Utc::now() - Days::new(2));
+
+        while let Some(x) = update.next().await {
+            x.unwrap();
+        }
+    }
 }

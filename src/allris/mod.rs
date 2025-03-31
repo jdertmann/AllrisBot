@@ -1,9 +1,12 @@
 mod html;
 mod oparl;
 
+use std::collections::BTreeMap;
+use std::pin::pin;
 use std::time::Duration;
 
 use chrono::{NaiveDate, Utc};
+use futures_util::{Stream, TryStreamExt};
 use oparl::Paper;
 use reqwest::{Client, Response};
 use teloxide::types::InlineKeyboardButton;
@@ -162,27 +165,31 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
     })
 }
 
-pub async fn scan_day(
-    allris_url: &AllrisUrl,
-    db: &SharedDatabaseConnection,
-    day: NaiveDate,
+async fn send_notifications(
+    db: &mut DatabaseConnection,
+    http_client: Client,
+    papers: impl Stream<Item = Result<Paper, Error>>,
 ) -> Result<(), Error> {
-    let http_client = reqwest::Client::new();
-    let papers = oparl::get_day(&http_client, allris_url, day).await?;
+    // if operations fail, it is ok to abort the whole function (`?` operator).
+    // If redis or network connection is down, we'll just have to try again on a later invocation.
 
-    for paper in papers {
-        let Some((_, volfdnr)) = paper.id.query_pairs().find(|(q, _)| q == "id") else {
-            log::warn!("ID deviates from the usual pattern, skipping: {}", paper.id);
-            continue;
-        };
-
-        // if db operations fail, it is ok to abort the whole operation (`?` operator).
-        // If redis is down, we'll just have to try again on a later invocation.
-
-        if db.is_known_volfdnr(&volfdnr).await? {
-            continue; // item already known
+    // collect items to BTreeMap to ensure ascending order
+    let mut papers_map: BTreeMap<String, Paper> = BTreeMap::new();
+    let mut papers = pin!(papers);
+    while let Some(paper) = papers.try_next().await? {
+        match paper.id.query_pairs().find(|(q, _)| q == "id") {
+            Some((_, volfdnr)) => {
+                if db.is_known_volfdnr(&volfdnr).await? {
+                    papers_map.insert(volfdnr.to_string(), paper);
+                }
+            }
+            None => {
+                log::warn!("Link deviates from usual pattern, skipping: {}", paper.id);
+            }
         }
+    }
 
+    for (volfdnr, paper) in papers_map {
         if let Some(message) = generate_notification(&http_client, &paper).await {
             db.schedule_broadcast(&volfdnr, &message).await?;
         } else {
@@ -193,10 +200,20 @@ pub async fn scan_day(
     Ok(())
 }
 
-async fn do_update(allris_url: &AllrisUrl, db: &redis::Client) -> Result<(), Error> {
-    let mut db_conn =
-        DatabaseConnection::connect(db.clone(), Some(Duration::from_secs(10))).await?;
+pub async fn scan_day(
+    allris_url: &AllrisUrl,
+    db: &SharedDatabaseConnection,
+    day: NaiveDate,
+) -> Result<(), Error> {
+    let http_client = reqwest::Client::new();
+    let papers = oparl::get_day(&http_client, allris_url, day);
+    send_notifications(&mut db.get_dedicated().await?, http_client, papers).await
+}
 
+pub async fn do_update(
+    allris_url: &AllrisUrl,
+    mut db_conn: DatabaseConnection,
+) -> Result<(), Error> {
     let Some(last_updated) = db_conn.get_last_update().await? else {
         // the very first invocation :) save the timestamp but do nothing yet
         db_conn.set_last_update(Utc::now()).await?;
@@ -205,28 +222,8 @@ async fn do_update(allris_url: &AllrisUrl, db: &redis::Client) -> Result<(), Err
 
     let update_started = Utc::now();
     let http_client = reqwest::Client::new();
-    let papers = oparl::get_update(&http_client, allris_url, last_updated).await?;
-
-    for paper in papers {
-        let Some((_, volfdnr)) = paper.id.query_pairs().find(|(q, _)| q == "id") else {
-            log::warn!("ID deviates from the usual pattern, skipping: {}", paper.id);
-            continue;
-        };
-
-        // if db operations fail, it is ok to abort the whole operation (`?` operator).
-        // If redis is down, we'll just have to try again on a later invocation.
-
-        if db_conn.is_known_volfdnr(&volfdnr).await? {
-            continue; // item already known
-        }
-
-        if let Some(message) = generate_notification(&http_client, &paper).await {
-            db_conn.schedule_broadcast(&volfdnr, &message).await?;
-        } else {
-            db_conn.add_known_volfdnr(&volfdnr).await?;
-        }
-    }
-
+    let papers = oparl::get_update(&http_client, allris_url, last_updated);
+    send_notifications(&mut db_conn, http_client, papers).await?;
     db_conn.set_last_update(update_started).await?;
 
     Ok(())
@@ -251,6 +248,8 @@ impl AllrisUrl {
 }
 
 pub async fn scraper(allris_url: AllrisUrl, update_interval: Duration, db: redis::Client) {
+    let db_timeout = Some(Duration::from_secs(10));
+
     let mut interval = interval(update_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
 
@@ -258,8 +257,8 @@ pub async fn scraper(allris_url: AllrisUrl, update_interval: Duration, db: redis
         interval.tick().await;
 
         log::info!("Updating ...");
-
-        match do_update(&allris_url, &db).await {
+        let db_conn = DatabaseConnection::new(db.clone(), db_timeout);
+        match do_update(&allris_url, db_conn).await {
             Ok(()) => log::info!("Update finished!"),
             Err(e) => log::error!("Update failed: {e}"),
         }
