@@ -13,7 +13,7 @@ use teloxide::types::{
     ButtonRequest, ChatAdministratorRights, KeyboardButton, KeyboardButtonRequestChat,
     KeyboardMarkup, Me, ReplyMarkup, RequestId,
 };
-use teloxide::utils::command::BotCommands;
+use teloxide::utils::command::{self, BotCommands, parse_command};
 use tokio::sync::Mutex;
 
 use crate::admin::AdminToken;
@@ -34,7 +34,7 @@ enum Command {
     ListFilters,
     #[command(description = "eine Filterregel löschen.")]
     DeleteFilter,
-    #[command(description = "alle Filterregeln löschen.")]
+    #[command(description = "alle Filterregeln löschen.", alias = "stop")]
     DeleteAllFilters,
     #[command(description = "Einstellungen für einen Channel bearbeiten")]
     ManageChannel,
@@ -181,9 +181,22 @@ async fn handle_message(
             return Ok(());
         }
 
-        let command = msg
-            .text()
-            .and_then(|text| Command::parse(text, me.username()).ok());
+        let command = if let Some(text) = msg.text() {
+            let parsed = Command::parse(text, me.username());
+            match parsed {
+                Ok(command) => Some(command),
+                Err(command::ParseError::UnknownCommand(_)) if matches!(state.state, State::Start) => {
+                    if let Some(cmd) = parse_command(text, me.username()) {
+                        bot.send_message(msg.chat.id, format!("Unbekannter Befehl \"{}\". Sende /help für eine Liste der verfügbaren Befehle.", cmd.0)).await?;
+                        return Ok(())
+                    }
+                    None
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
 
         if matches!(command, Some(Command::Cancel)) {
             let message = if matches!(state.state, State::Start) {
