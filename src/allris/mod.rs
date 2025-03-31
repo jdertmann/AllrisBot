@@ -2,6 +2,7 @@ mod html;
 mod oparl;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::pin::pin;
 use std::time::Duration;
 

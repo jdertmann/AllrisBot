@@ -3,6 +3,7 @@ mod message_sender;
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
