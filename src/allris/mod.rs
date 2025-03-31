@@ -179,7 +179,7 @@ async fn send_notifications(
     while let Some(paper) = papers.try_next().await? {
         match paper.id.query_pairs().find(|(q, _)| q == "id") {
             Some((_, volfdnr)) => {
-                if db.is_known_volfdnr(&volfdnr).await? {
+                if !db.is_known_volfdnr(&volfdnr).await? {
                     papers_map.insert(volfdnr.to_string(), paper);
                 }
             }

@@ -84,7 +84,7 @@ fn get_papers(
     client: reqwest::Client,
     url: Url,
 ) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
-    let (tx, rx) = mpsc::channel::<Result<Vec<Paper>, Error>>(20);
+    let (tx, rx) = mpsc::channel::<Result<Vec<Paper>, Error>>(3);
 
     tokio::spawn(async move {
         let mut next_url = Some(url);
