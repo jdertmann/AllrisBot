@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::hash::Hash;
 use std::ops::Deref;
 use std::sync::Arc;
