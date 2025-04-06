@@ -391,6 +391,8 @@ implement_with_retry! {
             .key(REGISTERED_CHATS_KEY)
             .key(registered_chat_key(old_chat_id))
             .key(registered_chat_key(new_chat_id))
+            .key(dialogue_key(old_chat_id))
+            .key(dialogue_key(new_chat_id))
             .arg(old_chat_id)
             .arg(new_chat_id)
             .invoke_async(connection)
@@ -600,8 +602,14 @@ implement_with_retry! {
     pub async fn get_dialogue<D: DeserializeOwned>(connection, chat_id: i64) -> Option<D> {
         let string : Option<String> = connection.get(dialogue_key(chat_id)).await?;
         if let Some(string) = string {
-            let deserialized = serde_json::from_str(&string)?;
-            Some(deserialized)
+            match serde_json::from_str(&string) {
+                Ok(deserialized) => Some(deserialized),
+                Err(e) => {
+                    log::warn!("Deleting malformed dialogue for chat {chat_id}");
+                    let _ : redis::RedisResult<()> = connection.del(dialogue_key(chat_id)).await;
+                    return Err(e.into());
+                }
+            }
         } else {
             None
         }
