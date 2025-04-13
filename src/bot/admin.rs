@@ -1,9 +1,10 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use rand::distr::Alphanumeric;
 
+#[derive(Debug)]
 pub struct AdminToken {
     token: String,
     valid_until: DateTime<Utc>,

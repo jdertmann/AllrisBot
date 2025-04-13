@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::NaiveDate;
+use dashmap::DashMap;
+use dashmap::try_result::TryResult;
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use serde::de::DeserializeOwned;
@@ -14,7 +17,33 @@ use teloxide::types::{
     KeyboardMarkup, Me, ReplyMarkup, RequestId,
 };
 use teloxide::utils::command::{self, BotCommands, parse_command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, mpsc};
+
+async fn test(bot: &Bot) {
+    let senders: Arc<DashMap<ChatId, mpsc::UnboundedSender<Message>>> = Default::default();
+
+    loop {}
+}
+
+async fn user_worker(
+    chat_id: ChatId,
+    mut rx: mpsc::UnboundedReceiver<Message>,
+    tx: Arc<DashMap<ChatId, mpsc::UnboundedSender<Message>>>,
+) {
+    loop {
+        while let Ok(msg) = rx.try_recv() {
+            todo!("handle message");
+        }
+
+        let tx_ref = tx.get_mut(&chat_id);
+
+        if rx.is_empty() {
+            rx.close();
+            drop(tx_ref);
+            tx.remove(&chat_id);
+        }
+    }
+}
 
 use crate::admin::AdminToken;
 use crate::allris::AllrisUrl;

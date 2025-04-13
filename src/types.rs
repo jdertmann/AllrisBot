@@ -1,16 +1,14 @@
 use std::fmt::Display;
 
+use frankenstein::methods::SendMessageParams;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use teloxide::types::{InlineKeyboardButton, ParseMode};
 
 pub type ChatId = i64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub text: String,
-    pub parse_mode: ParseMode,
-    pub buttons: Vec<InlineKeyboardButton>,
+    pub request: SendMessageParams,
     pub tags: Vec<(Tag, String)>,
 }
 
@@ -116,6 +114,16 @@ pub struct Condition {
     pub pattern: Regex,
     pub negate: bool,
 }
+
+impl PartialEq for Condition {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag
+            && self.pattern.as_str() == other.pattern.as_str()
+            && self.negate == other.negate
+    }
+}
+
+impl Eq for Condition {}
 
 impl Display for Condition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

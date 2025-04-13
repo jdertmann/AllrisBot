@@ -1,27 +1,25 @@
-mod admin;
 mod allris;
-mod bot_commands;
+mod bot;
 mod broadcasting;
 mod database;
 mod lru_cache;
 mod types;
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use admin::AdminToken;
 use broadcasting::broadcast_task;
 use clap::Parser;
+use database::DatabaseConnection;
 use redis::{ConnectionInfo, IntoConnectionInfo};
-use teloxide::adaptors::CacheMe;
-use teloxide::prelude::RequesterExt;
 use tokio::sync::mpsc;
 use url::Url;
 
 use crate::allris::AllrisUrl;
 
-type Bot = CacheMe<teloxide::Bot>;
+type Bot = frankenstein::client_reqwest::Bot;
 
 /// Telegram bot that notifies about newly published documents in the Allris 4 council information system.
 #[derive(Parser)]
@@ -106,6 +104,36 @@ fn init_logging(args: &Args) {
         .init();
 }
 
+fn escape_html(input: &str) -> Cow<'_, str> {
+    const SPECIAL_CHARS: [char; 5] = ['&', '<', '>', '"', '\''];
+    const REPLACE: [(char, &'static str); 5] = [
+        ('&', "&amp;"),
+        ('<', "&lt;"),
+        ('>', "&gt;"),
+        ('"', "&quot;"),
+        ('\'', "&#39;"),
+    ];
+
+    match input.find(SPECIAL_CHARS) {
+        Some(index) => {
+            let mut escaped = String::with_capacity(input.len() + 1);
+
+            escaped.push_str(&input[0..index]);
+
+            for c in input[index..].chars() {
+                if let Some(replace) = REPLACE.iter().find(|&(x, _)| *x == c).map(|(_, y)| y) {
+                    escaped.push_str(replace);
+                } else {
+                    escaped.push(c);
+                }
+            }
+
+            Cow::Owned(escaped)
+        }
+        None => Cow::Borrowed(input),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
@@ -113,25 +141,26 @@ async fn main() -> ExitCode {
     init_logging(&args);
 
     let db_client = redis::Client::open(args.redis_url).unwrap();
-    let bot = teloxide::Bot::new(&args.bot_token).cache_me();
+    let bot = frankenstein::client_reqwest::Bot::new(&args.bot_token);
 
-    let admin_token = args.generate_admin_token.then(|| {
-        let token = AdminToken::new();
-        println!("Admin token (valid for 10 minutes): {token}");
-        token
-    });
-
-    let dispatcher = if args.ignore_messages {
-        bot_commands::DispatcherTask::do_nothing()
-    } else {
-        bot_commands::DispatcherTask::new(
-            bot.clone(),
-            db_client.clone(),
-            args.allris_url.clone(),
-            admin_token,
-        )
-    };
-
+    tokio::spawn(bot::run(
+        bot.clone(),
+        DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
+        args.allris_url.clone(),
+        args.generate_admin_token,
+    ));
+    /*
+        let dispatcher = if args.ignore_messages {
+            bot_commands::DispatcherTask::do_nothing()
+        } else {
+            bot_commands::DispatcherTask::new(
+                bot.clone(),
+                db_client.clone(),
+                args.allris_url.clone(),
+                admin_token,
+            )
+        };
+    */
     let scraper = allris::scraper(
         args.allris_url,
         Duration::from_secs(args.update_interval),
@@ -148,7 +177,7 @@ async fn main() -> ExitCode {
         .expect("Unable to listen for shutdown signal");
 
     log::info!("Shutting down ...");
-    let _ = dispatcher.shutdown().await;
+    //let _ = dispatcher.shutdown().await;
 
     let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
 

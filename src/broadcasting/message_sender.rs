@@ -1,11 +1,9 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use teloxide::payloads::SendMessageSetters as _;
-use teloxide::prelude::Requester as _;
-use teloxide::sugar::request::RequestLinkPreviewExt;
-use teloxide::types::InlineKeyboardMarkup;
-use teloxide::{ApiError, RequestError};
+use frankenstein::response::{ErrorResponse, ResponseParameters};
+use frankenstein::types::LinkPreviewOptions;
+use frankenstein::{AsyncTelegramApi, Error as RequestError};
 use tokio::time::sleep;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
@@ -14,28 +12,22 @@ use crate::database::{self, StreamId};
 use crate::lru_cache::CacheItem;
 use crate::types::{ChatId, Message};
 
-const ADDITIONAL_ERRORS: &[&str] = &[
-    "Forbidden: bot was kicked from the group chat",
+const TELEGRAM_ERRORS: [&str; 14] = [
+    "Bad Request: CHAT_WRITE_FORBIDDEN",
+    "Bad Request: TOPIC_CLOSED",
+    "Bad Request: chat not found",
+    "Bad Request: have no rights to send a message",
     "Bad Request: not enough rights to send text messages to the chat",
+    "Bad Request: need administrator rights in the channel chat",
+    "Forbidden: bot is not a member of the channel chat",
+    "Forbidden: bot is not a member of the supergroup chat",
+    "Forbidden: bot was blocked by the user",
+    "Forbidden: bot was kicked from the channel chat",
+    "Forbidden: bot was kicked from the group chat",
+    "Forbidden: bot was kicked from the supergroup chat",
+    "Forbidden: the group chat was deleted",
+    "Forbidden: user is deactivated",
 ];
-
-fn is_chat_invalid(e: &teloxide::ApiError) -> bool {
-    use ApiError::*;
-
-    match e {
-        BotBlocked
-        | ChatNotFound
-        | GroupDeactivated
-        | BotKicked
-        | BotKickedFromSupergroup
-        | UserDeactivated
-        | CantInitiateConversation
-        | NotEnoughRightsToPostMessages
-        | CantTalkWithBots => true,
-        Unknown(err) if ADDITIONAL_ERRORS.contains(&err.as_str()) => true,
-        _ => false,
-    }
-}
 
 fn backoff_strategy() -> impl Iterator<Item = Duration> {
     ExponentialBackoff::from_millis(10)
@@ -104,21 +96,52 @@ impl MessageSender {
 
         let result = match response {
             Ok(()) => WorkerResult::Processed(self.message_id()),
-            Err(RequestError::Api(e)) if is_chat_invalid(&e) => {
-                shared.db.remove_subscription(self.chat_id).await?;
-                WorkerResult::ChatStopped
-            }
-            Err(RequestError::Api(ApiError::InvalidToken)) => {
-                log::error!("Invalid token! Was it revoked?");
-                shared.hard_shutdown.send_replace(true);
-                WorkerResult::ShuttingDown
-            }
-            Err(RequestError::MigrateToChatId(new_chat_id)) => {
-                self.unacknowledge_message(shared).await?;
-                shared.db.migrate_chat(self.chat_id, new_chat_id.0).await?;
-                WorkerResult::MigratedTo(new_chat_id.0)
-            }
-            Err(RequestError::RetryAfter(secs)) => retry!(secs.duration()),
+            Err(RequestError::Api(e)) => match e {
+                ErrorResponse {
+                    error_code: 401 | 404,
+                    ..
+                } => {
+                    log::error!("Invalid token! Was it revoked?");
+                    shared.hard_shutdown.send_replace(true);
+                    WorkerResult::ShuttingDown
+                }
+                ErrorResponse {
+                    parameters:
+                        Some(ResponseParameters {
+                            migrate_to_chat_id: Some(new_chat_id),
+                            ..
+                        }),
+                    ..
+                } => {
+                    self.unacknowledge_message(shared).await?;
+                    shared.db.migrate_chat(self.chat_id, new_chat_id).await?;
+                    WorkerResult::MigratedTo(new_chat_id)
+                }
+                ErrorResponse {
+                    parameters:
+                        Some(ResponseParameters {
+                            retry_after: Some(secs),
+                            ..
+                        }),
+                    ..
+                } => {
+                    retry!(Duration::from_secs(secs as u64))
+                }
+                ErrorResponse { description, .. }
+                    if TELEGRAM_ERRORS.contains(&description.as_str()) =>
+                {
+                    shared.db.remove_subscription(self.chat_id).await?;
+                    WorkerResult::ChatStopped
+                }
+                _ => {
+                    if let Some(backoff) = backoff {
+                        retry!(backoff)
+                    } else {
+                        log::error!("Sending failed definitely, not retrying!");
+                        WorkerResult::Processed(self.message_id())
+                    }
+                }
+            },
             _ => {
                 if let Some(backoff) = backoff {
                     retry!(backoff)
@@ -162,34 +185,12 @@ impl MessageSender {
     async fn try_send_message(&self, shared: &BroadcastResources) -> Result<(), RequestError> {
         let message = self.message();
 
-        let mut request = shared
-            .bot
-            .send_message(teloxide::types::ChatId(self.chat_id), &message.text)
-            .disable_link_preview(true)
-            .parse_mode(self.message().parse_mode);
+        let mut params = message.request.clone();
+        params.chat_id = self.chat_id.into();
+        params.link_preview_options = Some(LinkPreviewOptions::builder().is_disabled(true).build());
 
-        if !message.buttons.is_empty() {
-            let keyboard = InlineKeyboardMarkup::new(vec![message.buttons.clone()]);
-            request = request.reply_markup(keyboard);
-        }
-
-        request.await?;
+        shared.bot.send_message(&params).await?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// As soon as this fails, `ADDITIONAL_ERRORS` must be adapted
-    #[test]
-    fn test_api_error_not_yet_added() {
-        for msg in ADDITIONAL_ERRORS {
-            let api_error: ApiError = serde_json::from_str(&format!("\"{msg}\"")).unwrap();
-            assert_eq!(api_error, ApiError::Unknown(msg.to_string()));
-            assert!(is_chat_invalid(&api_error));
-        }
     }
 }

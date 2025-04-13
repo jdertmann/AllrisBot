@@ -237,9 +237,9 @@ async fn timeout_at<T>(
 macro_rules! implement_with_retry {
     (
         $conn_struct:ident,
-        $conn_struct_shared: ident;
+        $conn_struct_shared:ident;
         $(
-            $(#[$attr:ident])?
+            $(#[$attr:ident])*
             $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
             (
                 $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
@@ -264,7 +264,7 @@ macro_rules! implement_with_retry {
                             return Ok(Some(r));
                         }
                         Err(e) => {
-                            implement_with_retry!(@reset $($attr)?, conn);
+                            implement_with_retry!(@reset $($attr)*, conn);
                             conn.handle_error(e, deadline).await?
                         }
                     }
@@ -315,8 +315,57 @@ macro_rules! implement_with_retry {
             )+
         }
     };
+    (
+        $conn_struct:ident;
+        $(
+            $(#[$attr:ident])*
+            $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
+            (
+                $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
+            ) $(-> $return_type:ty)?
+            $body:block
+        )+
+    ) => {
+        impl $conn_struct {
+        $(
+            #[allow(dead_code)]
+            $vis async fn $fn_name $(< $t $(: $bound)?>)?  (
+                &mut self,
+                $($param_name: $param_type),*
+            ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
+                let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
+
+                loop {
+                    let request = async {
+                        let request = async {
+                            let $conn = self.get_connection().await?;
+                            Ok($body)
+                        };
+
+                        match timeout_at(deadline, request).await {
+                            Ok(r) => {
+                                self.retry_counter = 0;
+                                return Ok::<_, Error>(Some(r));
+                            }
+                            Err(e) => {
+                                implement_with_retry!(@reset $($attr)*, conn);
+                                self.handle_error(e, deadline).await?
+                            }
+                        }
+
+                        Ok(None)
+                    };
+
+                    if let Some(r) = request.await? {
+                        return Ok(r)
+                    }
+                }
+            }
+        )+
+        }
+    };
     (@reset reset_connection_on_error, $conn:expr) => { $conn.connection = None; };
-    (@reset , $conn:expr ) => { };
+    (@reset $($x:ident)?, $conn:expr ) => { };
     (@ret $t:ty) =>  { $t };
     (@ret) => { () };
 }
@@ -490,29 +539,6 @@ implement_with_retry! {
         }
     }
 
-    pub async fn next_message_id_blocking(
-        connection,
-        stream_id: StreamId,
-    ) -> StreamId {
-        loop {
-            let response: Vec<((), Vec<(StreamId, ())>)> = redis::cmd("XREAD")
-                .arg("BLOCK").arg(10000)
-                .arg("COUNT").arg(1)
-                .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
-                .query_async(connection)
-                .await?;
-
-            let id = response.into_iter()
-                .next()
-                .and_then(|(_, v)| v.into_iter().next())
-                .map(|(id, _)| id);
-
-            if let Some(id) = id {
-                break id
-            }
-        }
-    }
-
     pub async fn current_message_id(
         connection
     ) -> StreamId {
@@ -566,8 +592,12 @@ implement_with_retry! {
         }
     }
 
-    pub async fn set_admin(connection, chat_id: i64) {
-        connection.set(ADMIN_KEY, chat_id).await?
+    pub async fn set_admin(connection, user_id: u64) {
+        connection.set(ADMIN_KEY, user_id).await?
+    }
+
+    pub async fn get_admin(connection) -> Option<u64> {
+        connection.get(ADMIN_KEY).await?
     }
 
     pub async fn is_admin(connection, chat_id: i64) -> bool {
@@ -615,4 +645,31 @@ implement_with_retry! {
         }
     }
 
+}
+
+implement_with_retry! {
+    DatabaseConnection;
+
+    pub async fn next_message_id_blocking(
+        connection,
+        stream_id: StreamId,
+    ) -> StreamId {
+        loop {
+            let response: Vec<((), Vec<(StreamId, ())>)> = redis::cmd("XREAD")
+                .arg("BLOCK").arg(10000)
+                .arg("COUNT").arg(1)
+                .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
+                .query_async(connection)
+                .await?;
+
+            let id = response.into_iter()
+                .next()
+                .and_then(|(_, v)| v.into_iter().next())
+                .map(|(id, _)| id);
+
+            if let Some(id) = id {
+                break id
+            }
+        }
+    }
 }
