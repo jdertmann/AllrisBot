@@ -142,42 +142,40 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
         }
     }
 
-    pub async fn get<Err, Fut: Future<Output = Result<V, Err>>>(
+    pub async fn get<Err>(
         &self,
         key: K,
-        init: impl FnOnce() -> Fut,
+        init: impl AsyncFnOnce() -> Result<V, Err>,
     ) -> Result<CacheItem<V>, Err> {
         let cell = self.inner.lock().await.get(key);
 
-        cell.get_or_try_init(init).await?;
+        cell.get_or_try_init(|| init()).await?;
 
         Ok(CacheItem(cell))
     }
 
-    pub async fn get_if_valid<Err, Fut: Future<Output = Result<V, Err>>>(
+    pub async fn get_if_valid<Err>(
         &self,
         key: K,
         is_valid: impl FnOnce(&V) -> bool,
-        init: impl FnOnce() -> Fut,
+        init: impl AsyncFnOnce() -> Result<V, Err>,
     ) -> Result<CacheItem<V>, Err> {
         let cell = self.inner.lock().await.get_if_valid(key, is_valid);
 
-        cell.get_or_try_init(init).await?;
+        cell.get_or_try_init(|| init()).await?;
 
         Ok(CacheItem(cell))
     }
 
-    pub async fn get_some<Err, Fut: Future<Output = Result<Option<V>, Err>>>(
+    pub async fn get_some<Err>(
         &self,
         key: K,
-        init: impl FnOnce() -> Fut,
+        init: impl AsyncFnOnce() -> Result<Option<V>, Err>,
     ) -> Result<Option<CacheItem<V>>, Err> {
-        let init2 = || async {
-            match init().await {
-                Ok(Some(r)) => Ok(r),
-                Ok(None) => Err(None),
-                Err(e) => Err(Some(e)),
-            }
+        let init2 = async || match init().await {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err(None),
+            Err(e) => Err(Some(e)),
         };
 
         match self.get(key, init2).await {
@@ -199,7 +197,7 @@ mod tests {
 
     macro_rules! ok {
         ($i:expr) => {
-            || async { Ok::<_, ()>($i) }
+            async || Ok::<_, ()>($i)
         };
     }
 
@@ -256,7 +254,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
                 cache
-                    .get((), || async {
+                    .get((), async || {
                         tokio::time::sleep(Duration::from_millis(200 + 5 * i)).await;
                         Ok::<_, ()>(i * 10)
                     })
@@ -268,7 +266,7 @@ mod tests {
         for handle in handles {
             let result = handle.await.unwrap();
             let expected = cache
-                .get((), || async { Err(()) })
+                .get((), async || Err(()))
                 .now_or_never()
                 .unwrap()
                 .unwrap();

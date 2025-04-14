@@ -98,8 +98,8 @@ pub async fn get_organization(client: &reqwest::Client, id: &Url) -> Result<Orga
         .get_if_valid(
             id.clone(),
             |(t, _)| Utc::now() - t < Duration::days(3),
-            || async {
-                let r = http_request::<Organization, _>(&client, id, Response::json).await?;
+            async || {
+                let r: Organization = http_request(&client, id, Response::json).await?;
                 Ok((Utc::now(), r))
             },
         )
@@ -117,7 +117,7 @@ fn get_papers(
         let mut next_url = Some(url);
 
         while let Some(url) = next_url {
-            match http_request::<Papers, _>(&client, &url, Response::json).await {
+            match http_request::<Papers>(&client, &url, Response::json).await {
                 Ok(content) => {
                     if tx.send(Ok(content.data)).await.is_err() {
                         return;

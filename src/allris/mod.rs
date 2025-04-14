@@ -33,10 +33,10 @@ pub enum Error {
     MissingFields,
 }
 
-async fn http_request<T, Fut: Future<Output = reqwest::Result<T>>>(
+async fn http_request<T>(
     client: &Client,
     url: &Url,
-    f: impl Fn(Response) -> Fut,
+    f: impl AsyncFn(Response) -> reqwest::Result<T>,
 ) -> reqwest::Result<T> {
     log::info!("Retrieving {url} ...");
 
