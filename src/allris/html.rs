@@ -29,13 +29,11 @@ pub struct WebsiteData {
     pub unterstuetzer: Vec<String>,
     pub amt: Option<String>,
     pub beteiligt: Vec<String>,
-    pub gremien: Vec<String>,
+    pub gremien: Vec<(String, Option<Url>, bool)>,
     pub already_discussed: bool,
 }
 
 pub async fn scrape_website(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
-    log::info!("Scraping website at {url}");
-
     let html = http_request(client, url, Response::text).await?;
     let document = Html::parse_document(&html);
 
@@ -45,6 +43,7 @@ pub async fn scrape_website(client: &Client, url: &Url) -> Result<WebsiteData, E
     )
     .map(extract_text)
     .filter(|s| !s.is_empty())
+    .map(|x| (x, None, false))
     .collect();
 
     let beteiligt = select!(document, "#vobamt")

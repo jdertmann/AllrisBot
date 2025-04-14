@@ -1,6 +1,7 @@
 use std::future::ready;
+use std::sync::LazyLock;
 
-use chrono::{DateTime, Days, NaiveDate, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, Days, Duration, NaiveDate, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Europe;
 use futures_util::{Stream, TryStreamExt};
 use reqwest::Response;
@@ -11,18 +12,30 @@ use url::Url;
 
 use super::{AllrisUrl, Error};
 use crate::allris::http_request;
+use crate::lru_cache::{Cache, Lru};
+
+static ORGANIZATIONS: LazyLock<Cache<Url, (DateTime<Utc>, Organization), Lru<Url>>> =
+    LazyLock::new(|| Cache::new(Lru::new(50)));
 
 const LOCAL_TZ: chrono_tz::Tz = Europe::Berlin;
 
-/*
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Organization {
+    pub id: Url,
+    pub name: Option<String>,
+    pub web: Option<Url>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Consultation {
-    pub role: String,
-    pub authoritative: bool,
-    pub organization: Vec<String>,
+    pub role: Option<String>,
+    pub authoritative: Option<bool>,
+    #[serde(default)]
+    pub organization: Vec<Url>,
+    pub agenda_item: Option<Url>,
 }
-*/
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,8 +53,8 @@ pub struct Paper {
     pub date: Option<NaiveDate>,
     pub paper_type: Option<String>,
     pub web: Option<Url>,
-    // #[serde(default)]
-    // pub consultation: Vec<Consultation>,
+    #[serde(default)]
+    pub consultation: Vec<Consultation>,
     pub deleted: bool,
 }
 
@@ -80,6 +93,20 @@ fn endpoint_url<T: TimeZone>(
     url
 }
 
+pub async fn get_organization(client: &reqwest::Client, id: &Url) -> Result<Organization, Error> {
+    ORGANIZATIONS
+        .get_if_valid(
+            id.clone(),
+            |(t, _)| Utc::now() - t < Duration::days(3),
+            || async {
+                let r = http_request::<Organization, _>(&client, id, Response::json).await?;
+                Ok((Utc::now(), r))
+            },
+        )
+        .await
+        .map(|x| x.1.clone())
+}
+
 fn get_papers(
     client: reqwest::Client,
     url: Url,
@@ -90,7 +117,6 @@ fn get_papers(
         let mut next_url = Some(url);
 
         while let Some(url) = next_url {
-            log::info!("Retrieving {url} ...");
             match http_request::<Papers, _>(&client, &url, Response::json).await {
                 Ok(content) => {
                     if tx.send(Ok(content.data)).await.is_err() {

@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use chrono::{NaiveDate, Utc};
 use futures_util::{Stream, TryStreamExt};
-use oparl::Paper;
+use oparl::{Consultation, Paper, get_organization};
 use reqwest::{Client, Response};
 use teloxide::types::InlineKeyboardButton;
-use teloxide::utils::html::{bold, escape};
+use teloxide::utils::html::{bold, escape, link};
 use thiserror::Error;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_retry::RetryIf;
@@ -29,6 +29,8 @@ pub enum Error {
     Database(#[from] database::Error),
     #[error("parsing url failed: {0}")]
     ParseUrl(#[from] url::ParseError),
+    #[error("missing fields")]
+    MissingFields,
 }
 
 async fn http_request<T, Fut: Future<Output = reqwest::Result<T>>>(
@@ -36,6 +38,8 @@ async fn http_request<T, Fut: Future<Output = reqwest::Result<T>>>(
     url: &Url,
     f: impl Fn(Response) -> Fut,
 ) -> reqwest::Result<T> {
+    log::info!("Retrieving {url} ...");
+
     let action = || async { f(client.get(url.clone()).send().await?.error_for_status()?).await };
     let retry_strategy = ExponentialBackoff::from_millis(20).take(3);
     let retry_condition =
@@ -79,10 +83,27 @@ fn generate_tags(dsnr: Option<&str>, paper: &Paper, data: &WebsiteData) -> Vec<(
     }
 
     for gremium in gremien {
-        tags.push((Gremium, gremium.clone()));
+        tags.push((Gremium, gremium.0.clone()));
     }
 
     tags
+}
+
+async fn get_gremien(
+    client: &Client,
+    consultation: &[Consultation],
+) -> Result<Vec<(String, Option<Url>, bool)>, Error> {
+    let mut gremien = vec![];
+    for c in consultation {
+        let authorative = c.authoritative.unwrap_or(false);
+        for org in &c.organization {
+            let gr = get_organization(client, org).await?;
+            let name = gr.name.ok_or(Error::MissingFields)?;
+            gremien.push((name, gr.web, authorative))
+        }
+    }
+
+    Ok(gremien)
 }
 
 async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message> {
@@ -109,6 +130,15 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         already_discussed,
         ..
     } = data;
+
+    let gremien = match get_gremien(client, &paper.consultation).await {
+        Ok(gr) if !gr.is_empty() => gr,
+        Ok(_) => gremien,
+        Err(e) => {
+            log::warn!("Unable to get consultation info: {e}");
+            gremien
+        }
+    };
 
     if already_discussed {
         // was already discussed, probably old document, skipping
@@ -141,7 +171,23 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
 
     if !gremien.is_empty() {
         msg += "\n🏛️ ";
-        msg += &escape(&gremien.join(" | "));
+        for (i, gremium) in gremien.iter().enumerate() {
+            if i > 0 {
+                msg += " | ";
+            }
+
+            let mut gr = if let Some(url) = &gremium.1 {
+                link(url.as_str(), &gremium.0)
+            } else {
+                escape(&gremium.0)
+            };
+
+            if gremium.2 {
+                gr = bold(&gr);
+            }
+
+            msg += &gr;
+        }
     }
 
     if let Some(dsnr) = dsnr {
