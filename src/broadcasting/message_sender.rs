@@ -3,18 +3,18 @@ use std::time::Duration;
 
 use teloxide::payloads::SendMessageSetters as _;
 use teloxide::prelude::Requester as _;
+use teloxide::sugar::request::RequestLinkPreviewExt;
 use teloxide::types::InlineKeyboardMarkup;
 use teloxide::{ApiError, RequestError};
 use tokio::time::sleep;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
-use super::lru_cache::CacheItem;
 use super::{BroadcastResources, WorkerResult};
 use crate::database::{self, StreamId};
+use crate::lru_cache::CacheItem;
 use crate::types::{ChatId, Message};
 
 const ADDITIONAL_ERRORS: &[&str] = &[
-    "Forbidden: bot was kicked from the channel chat",
     "Forbidden: bot was kicked from the group chat",
     "Bad Request: not enough rights to send text messages to the chat",
 ];
@@ -165,6 +165,7 @@ impl MessageSender {
         let mut request = shared
             .bot
             .send_message(teloxide::types::ChatId(self.chat_id), &message.text)
+            .disable_link_preview(true)
             .parse_mode(self.message().parse_mode);
 
         if !message.buttons.is_empty() {
