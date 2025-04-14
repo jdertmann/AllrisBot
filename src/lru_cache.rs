@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::ops::Deref;
@@ -6,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
 pub trait EvictionStrategy<K> {
-    fn insert(&mut self, key: K, is_present: bool) -> Option<K>;
+    fn insert(&mut self, key: &K, is_present: bool) -> Option<K>;
 
     fn initial_capacity(&self) -> usize {
         0
@@ -37,18 +38,20 @@ impl<K> EvictionStrategy<K> for NoEviction {
     }
 }*/
 
-impl<K: Eq> EvictionStrategy<K> for Lru<K> {
-    fn insert(&mut self, key: K, is_present: bool) -> Option<K> {
+impl<K: Eq + Clone> EvictionStrategy<K> for Lru<K> {
+    fn insert(&mut self, key: &K, is_present: bool) -> Option<K> {
         if is_present {
-            if let Some(index) = self.lru.iter().position(|k| *k == key) {
-                self.lru.remove(index);
-            }
+            let key = if let Some(index) = self.lru.iter().position(|k| k == key) {
+                self.lru.remove(index).unwrap()
+            } else {
+                key.clone()
+            };
 
             self.lru.push_front(key);
 
             None
         } else {
-            self.lru.push_front(key);
+            self.lru.push_front(key.clone());
 
             if self.lru.len() > self.capacity {
                 self.lru.pop_back()
@@ -68,7 +71,7 @@ struct CacheInner<K, V, E> {
     eviction_strategy: E,
 }
 
-impl<K: Eq + Hash + Copy, V, E: EvictionStrategy<K>> CacheInner<K, V, E> {
+impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> CacheInner<K, V, E> {
     fn new(eviction_strategy: E) -> Self {
         CacheInner {
             cache: HashMap::with_capacity(eviction_strategy.initial_capacity() + 1),
@@ -76,10 +79,34 @@ impl<K: Eq + Hash + Copy, V, E: EvictionStrategy<K>> CacheInner<K, V, E> {
         }
     }
 
+    fn get_if_valid(&mut self, key: K, is_valid: impl FnOnce(&V) -> bool) -> Arc<OnceCell<V>> {
+        if let Some(evict) = self
+            .eviction_strategy
+            .insert(&key, self.cache.contains_key(&key))
+        {
+            self.cache.remove(&evict);
+        }
+
+        match self.cache.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let cell = entry.get();
+                if let Some(val) = cell.get() {
+                    if !is_valid(val) {
+                        entry.insert(Default::default());
+                        return entry.get().clone();
+                    }
+                }
+
+                cell.clone()
+            }
+            Entry::Vacant(entry) => entry.insert(Default::default()).clone(),
+        }
+    }
+
     fn get(&mut self, key: K) -> Arc<OnceCell<V>> {
         if let Some(evict) = self
             .eviction_strategy
-            .insert(key, self.cache.contains_key(&key))
+            .insert(&key, self.cache.contains_key(&key))
         {
             self.cache.remove(&evict);
         }
@@ -97,11 +124,18 @@ impl<V> Deref for CacheItem<V> {
         self.0.get().expect("invariant: cell is initialized")
     }
 }
+
 pub struct Cache<K, V, E> {
     inner: Mutex<CacheInner<K, V, E>>,
 }
 
-impl<K: Eq + Hash + Copy, V, E: EvictionStrategy<K>> Cache<K, V, E> {
+impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K> + Default> Default for Cache<K, V, E> {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
+
+impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
     pub fn new(eviction_strategy: E) -> Self {
         Self {
             inner: Mutex::new(CacheInner::new(eviction_strategy)),
@@ -114,6 +148,19 @@ impl<K: Eq + Hash + Copy, V, E: EvictionStrategy<K>> Cache<K, V, E> {
         init: impl FnOnce() -> Fut,
     ) -> Result<CacheItem<V>, Err> {
         let cell = self.inner.lock().await.get(key);
+
+        cell.get_or_try_init(init).await?;
+
+        Ok(CacheItem(cell))
+    }
+
+    pub async fn get_if_valid<Err, Fut: Future<Output = Result<V, Err>>>(
+        &self,
+        key: K,
+        is_valid: impl FnOnce(&V) -> bool,
+        init: impl FnOnce() -> Fut,
+    ) -> Result<CacheItem<V>, Err> {
+        let cell = self.inner.lock().await.get_if_valid(key, is_valid);
 
         cell.get_or_try_init(init).await?;
 
@@ -189,12 +236,12 @@ mod tests {
     async fn test_lru_eviction_order() {
         let mut lru = Lru::new(2);
 
-        assert_eq!(lru.insert(1, false), None);
-        assert_eq!(lru.insert(2, false), None);
-        assert_eq!(lru.insert(3, false), Some(1)); // Evicts 1
+        assert_eq!(lru.insert(&1, false), None);
+        assert_eq!(lru.insert(&2, false), None);
+        assert_eq!(lru.insert(&3, false), Some(1)); // Evicts 1
 
-        lru.insert(2, true); // Move 2 to the front
-        assert_eq!(lru.insert(4, false), Some(3)); // Evicts 3, as 2 was accessed recently
+        lru.insert(&2, true); // Move 2 to the front
+        assert_eq!(lru.insert(&4, false), Some(3)); // Evicts 3, as 2 was accessed recently
     }
 
     #[tokio::test]

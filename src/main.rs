@@ -3,6 +3,7 @@ mod allris;
 mod bot_commands;
 mod broadcasting;
 mod database;
+mod lru_cache;
 mod types;
 
 use std::error::Error;

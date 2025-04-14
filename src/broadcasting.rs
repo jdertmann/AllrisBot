@@ -1,4 +1,3 @@
-mod lru_cache;
 mod message_sender;
 
 use std::collections::HashMap;
@@ -8,13 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
-use lru_cache::Lru;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
 
-use self::lru_cache::Cache;
 use self::message_sender::MessageSender;
 use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnection, StreamId};
+use crate::lru_cache::{Cache, Lru};
 use crate::types::{ChatId, Condition, Filter, Message};
 
 const BROADCASTS_PER_SECOND: f32 = 30.;
