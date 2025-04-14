@@ -137,8 +137,11 @@ pub fn get_update(
     url: &AllrisUrl,
     since: DateTime<Utc>,
 ) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
-    // there are sometimes old papers included. we don't want them
+    // there are sometimes very old papers included. we don't want them
     let oldest_date = (since - Days::new(2)).date_naive();
+
+    // include older changes to address possible inaccuracies
+    let since = since - chrono::Duration::hours(2);
     let url = endpoint_url(url, since, None);
     get_papers(client.clone(), url)
         .try_filter(move |paper| ready(!paper.deleted && paper.date >= Some(oldest_date)))
