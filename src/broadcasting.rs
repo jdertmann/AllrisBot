@@ -210,13 +210,17 @@ impl<'a, Fut, F: Fn(&'a BroadcastResources, ChatId) -> Fut> BroadcastManager<'a,
 
         async move {
             if was_error {
-                sleep(Duration::from_secs(60)).await;
+                sleep(Duration::from_secs(20)).await;
             }
 
             let result = async {
-                let id = conn.next_message_ready(id).await?;
+                let next_id = if let Some(id) = id {
+                    conn.next_message_id_blocking(id).await?
+                } else {
+                    conn.current_message_id().await?
+                };
                 let active_chats = conn.get_active_chats().await?;
-                Ok((id, active_chats))
+                Ok((next_id, active_chats))
             }
             .await;
 

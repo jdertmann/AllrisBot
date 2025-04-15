@@ -2,11 +2,11 @@ use std::fmt::{self, Debug};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use futures_util::lock::Mutex;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisWrite, RetryMethod};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep_until};
 
 use crate::types::{Filter, Message};
@@ -488,41 +488,44 @@ implement_with_retry! {
         }
     }
 
-    pub async fn next_message_ready(
+    pub async fn next_message_id_blocking(
         connection,
-        stream_id: Option<StreamId>,
+        stream_id: StreamId,
     ) -> StreamId {
         loop {
-            let r = if let Some(stream_id) = stream_id {
-                let response: Vec<((), Vec<(StreamId, Message)>)> = redis::cmd("XREAD")
-                    .arg("BLOCK").arg(10000)
-                    .arg("COUNT").arg(1)
-                    .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
-                    .query_async(connection)
-                    .await?;
+            let response: Vec<((), Vec<(StreamId, ())>)> = redis::cmd("XREAD")
+                .arg("BLOCK").arg(10000)
+                .arg("COUNT").arg(1)
+                .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
+                .query_async(connection)
+                .await?;
 
-                response.into_iter().next().map(|(_, v)| v)
-            } else {
-                let response: Vec<(StreamId, Message)> = redis::cmd("XREVRANGE")
-                    .arg(SCHEDULED_MESSAGES_KEY)
-                    .arg("+").arg("-")
-                    .arg("COUNT").arg(1)
-                    .query_async(connection)
-                    .await?;
-
-                Some(response)
-            };
-
-            let id = r
-                .and_then(|v| v.into_iter().next())
+            let id = response.into_iter()
+                .next()
+                .and_then(|(_, v)| v.into_iter().next())
                 .map(|(id, _)| id);
 
             if let Some(id) = id {
                 break id
-            } else if stream_id.is_none() {
-                break StreamId::ZERO;
             }
         }
+    }
+
+    pub async fn current_message_id(
+        connection
+    ) -> StreamId {
+        let response: Vec<(StreamId, ())> = redis::cmd("XREVRANGE")
+            .arg(SCHEDULED_MESSAGES_KEY)
+            .arg("+").arg("-")
+            .arg("COUNT").arg(1)
+            .query_async(connection)
+            .await?;
+
+        response
+            .into_iter()
+            .next()
+            .map(|(id, _)| id)
+            .unwrap_or(StreamId::ZERO)
     }
 
     pub async fn get_next_message(
