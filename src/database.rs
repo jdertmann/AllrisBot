@@ -33,6 +33,8 @@ pub enum Error {
     Redis(#[from] redis::RedisError),
     #[error("database timeout")]
     Timeout,
+    #[error("regex error: {0}")]
+    Regex(#[from] regex::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }

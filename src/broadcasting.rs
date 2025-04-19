@@ -13,30 +13,11 @@ use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
 use self::message_sender::MessageSender;
 use crate::database::{self, ChatState, DatabaseConnection, SharedDatabaseConnection, StreamId};
 use crate::lru_cache::{Cache, Lru};
-use crate::types::{ChatId, Condition, Filter, Message};
+use crate::types::{ChatId, Message};
 
 const BROADCASTS_PER_SECOND: f32 = 30.;
 const MESSAGE_INTERVAL_CHAT: Duration = Duration::from_secs(1);
 const MESSAGE_INTERVAL_GROUP: Duration = Duration::from_secs(3);
-
-impl Condition {
-    fn matches(&self, message: &Message) -> bool {
-        message
-            .tags
-            .iter()
-            .filter(|x| x.0 == self.tag)
-            .any(|x| self.pattern.is_match(&x.1))
-            ^ self.negate
-    }
-}
-
-impl Filter {
-    fn matches(&self, message: &Message) -> bool {
-        self.conditions
-            .iter()
-            .all(|condition| condition.matches(message))
-    }
-}
 
 enum WorkerResult {
     Processed(StreamId),

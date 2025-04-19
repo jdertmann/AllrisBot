@@ -3,14 +3,15 @@ use std::time::Duration;
 
 use frankenstein::response::{ErrorResponse, ResponseParameters};
 use frankenstein::types::LinkPreviewOptions;
-use frankenstein::{AsyncTelegramApi, Error as RequestError};
+use frankenstein::{AsyncTelegramApi, Error as RequestError, ParseMode};
+use regex::Regex;
 use tokio::time::sleep;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
 use super::{BroadcastResources, WorkerResult};
 use crate::database::{self, StreamId};
 use crate::lru_cache::CacheItem;
-use crate::types::{ChatId, Message};
+use crate::types::{ChatId, Condition, Filter, Message};
 
 const TELEGRAM_ERRORS: [&str; 14] = [
     "Bad Request: CHAT_WRITE_FORBIDDEN",
@@ -37,6 +38,31 @@ fn backoff_strategy() -> impl Iterator<Item = Duration> {
         .take(5)
 }
 
+impl Condition {
+    fn matches(&self, message: &Message) -> Result<bool, regex::Error> {
+        let regex = Regex::new(&self.pattern)?;
+        let result = message
+            .tags
+            .iter()
+            .filter(|x| x.0 == self.tag)
+            .any(|x| regex.is_match(&x.1));
+
+        Ok(result ^ self.negate)
+    }
+}
+
+impl Filter {
+    fn matches(&self, message: &Message) -> Result<bool, regex::Error> {
+        for condition in &self.conditions {
+            if !condition.matches(message)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+}
+
 pub struct MessageSender {
     chat_id: ChatId,
     entry: CacheItem<(StreamId, Message)>,
@@ -57,9 +83,13 @@ impl MessageSender {
 
     pub async fn check_filters(&self, shared: &BroadcastResources) -> database::Result<bool> {
         let filters = shared.db.get_filters(self.chat_id).await?;
-        let matches = filters.iter().any(|filter| filter.matches(self.message()));
+        for filter in filters {
+            if filter.matches(self.message())? {
+                return Ok(true);
+            }
+        }
 
-        Ok(matches)
+        Ok(false)
     }
 
     pub async fn acknowledge_message(&self, shared: &BroadcastResources) -> database::Result<bool> {
@@ -186,6 +216,7 @@ impl MessageSender {
         let message = self.message();
 
         let mut params = message.request.clone();
+        params.parse_mode = Some(ParseMode::Html);
         params.chat_id = self.chat_id.into();
         params.link_preview_options = Some(LinkPreviewOptions::builder().is_disabled(true).build());
 

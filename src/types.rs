@@ -1,7 +1,6 @@
 use std::fmt::Display;
 
 use frankenstein::methods::SendMessageParams;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub type ChatId = i64;
@@ -47,13 +46,13 @@ impl Tag {
         match self {
             Tag::Dsnr => None,
             Tag::Art => None,
-            Tag::Gremium => Some("Gremien, die zur Beratung der Vorlage vorgesehen sind."),
+            Tag::Gremium => Some("Gremien, die zur Beratung der Vorlage vorgesehen sind"),
             Tag::Verfasser => {
-                Some("Personen oder Fraktionen, die den Antrag oder die Frage gestellt haben.")
+                Some("Personen oder Fraktionen, die den Antrag oder die Frage gestellt haben")
             }
             Tag::Federführend => None,
             Tag::Beteiligt => Some(
-                "Jedes an der Vorlage beteiligte Amt. Das schließt auch das federführende Amt mit ein.",
+                "jedes an der Vorlage beteiligte Amt; das schließt auch das federführende Amt mit ein",
             ),
         }
     }
@@ -62,7 +61,8 @@ impl Tag {
         match self {
             Tag::Dsnr => &["252807", "242248-02 AA"],
             Tag::Art => &[
-                "Beschlussvorlage, Stellungnahme der Verwaltung",
+                "Beschlussvorlage",
+                "Stellungnahme der Verwaltung",
                 "Anregungen und Beschwerden",
             ],
             Tag::Gremium => &[
@@ -86,44 +86,12 @@ impl Tag {
     }
 }
 
-mod serde_regex {
-    use regex::Regex;
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &regex::Regex, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(value.as_str())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<regex::Regex, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = <&str>::deserialize(deserializer)?;
-        Regex::new(s).map_err(D::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Condition {
     pub tag: Tag,
-    #[serde(with = "serde_regex")]
-    pub pattern: Regex,
+    pub pattern: String,
     pub negate: bool,
 }
-
-impl PartialEq for Condition {
-    fn eq(&self, other: &Self) -> bool {
-        self.tag == other.tag
-            && self.pattern.as_str() == other.pattern.as_str()
-            && self.negate == other.negate
-    }
-}
-
-impl Eq for Condition {}
 
 impl Display for Condition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -137,7 +105,7 @@ impl Display for Condition {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Filter {
     pub conditions: Vec<Condition>,
 }
@@ -147,9 +115,8 @@ impl Display for Filter {
         if self.conditions.is_empty() {
             writeln!(f, "Alle Vorlagen")?;
         } else {
-            for (i, condition) in self.conditions.iter().enumerate() {
-                let and = if i == 0 { "  " } else { "& " };
-                writeln!(f, "{and}{condition}")?;
+            for condition in &self.conditions {
+                writeln!(f, "• {condition}")?;
             }
         }
 
