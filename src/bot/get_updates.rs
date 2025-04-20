@@ -6,7 +6,9 @@ use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::GetUpdatesParams;
 use frankenstein::types::{AllowedUpdate, Message};
 use frankenstein::updates::UpdateContent;
-use tokio::sync::Mutex;
+use tokio::select;
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 const CLEANUP_PERIOD: Duration = Duration::from_secs(300);
@@ -27,9 +29,16 @@ fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>
     *last_cleanup = now;
 }
 
-pub async fn handle_updates(bot: crate::Bot, handler: impl UpdateHandler) {
+pub async fn handle_updates(
+    bot: crate::Bot,
+    handler: impl UpdateHandler,
+    mut shutdown: oneshot::Receiver<()>,
+) {
     let mut mutexes: HashMap<i64, Weak<Mutex<()>>> = HashMap::new();
     let mut last_cleanup = Instant::now();
+
+    let mut join_set = JoinSet::new();
+    let mut marked_seen = true;
 
     let mut params = GetUpdatesParams::builder()
         .timeout(30)
@@ -37,8 +46,14 @@ pub async fn handle_updates(bot: crate::Bot, handler: impl UpdateHandler) {
         .build();
 
     loop {
-        match bot.get_updates(&params).await {
+        let updates = select! {
+            updates = bot.get_updates(&params) => updates,
+            _ = &mut shutdown => break
+        };
+
+        match updates {
             Ok(updates) => {
+                marked_seen = updates.result.is_empty();
                 for update in updates.result {
                     params.offset = Some(update.update_id as i64 + 1);
 
@@ -67,15 +82,27 @@ pub async fn handle_updates(bot: crate::Bot, handler: impl UpdateHandler) {
                         handler.handle_message(msg).await;
                         drop(guard)
                     };
-                    tokio::spawn(fut);
+                    join_set.spawn(fut);
                 }
             }
             Err(e) => {
-                log::error!("Error retrieving updates: {:?}", e);
+                log::error!("Error retrieving updates: {}", e);
                 sleep(Duration::from_secs(5)).await;
             }
         }
 
         cleanup(&mut last_cleanup, &mut mutexes);
     }
+
+    // just mark as seen, but don't handle the response
+    if !marked_seen {
+        params.timeout = Some(0);
+        params.limit = Some(1);
+
+        if let Err(e) = bot.get_updates(&params).await {
+            log::error!("Error marking messages as seen: {}", e);
+        }
+    }
+
+    join_set.join_all().await;
 }

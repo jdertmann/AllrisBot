@@ -7,6 +7,7 @@ mod types;
 
 use std::borrow::Cow;
 use std::error::Error;
+use std::pin::{Pin, pin};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use broadcasting::broadcast_task;
 use clap::Parser;
 use database::DatabaseConnection;
 use redis::{ConnectionInfo, IntoConnectionInfo};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 use crate::allris::AllrisUrl;
@@ -80,6 +81,7 @@ struct Args {
 fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
     let url = Url::parse(input).map_err(|e| e.to_string())?;
     let info = url.into_connection_info().map_err(
+        // the redis crate implements no other way to get to a human-friendly error description
         #[allow(deprecated)]
         |e| e.description().to_string(),
     )?;
@@ -143,31 +145,37 @@ async fn main() -> ExitCode {
     let db_client = redis::Client::open(args.redis_url).unwrap();
     let bot = frankenstein::client_reqwest::Bot::new(&args.bot_token);
 
-    tokio::spawn(bot::run(
-        bot.clone(),
-        DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
-        args.allris_url.clone(),
-        args.generate_admin_token,
-    ));
-    /*
-        let dispatcher = if args.ignore_messages {
-            bot_commands::DispatcherTask::do_nothing()
-        } else {
-            bot_commands::DispatcherTask::new(
-                bot.clone(),
-                db_client.clone(),
-                args.allris_url.clone(),
-                admin_token,
-            )
+    macro_rules! pin_dyn {
+        ($x:expr) => {
+            pin!($x) as Pin<&mut dyn Future<Output = _>>
         };
-    */
+    }
+
+    let (bot_handle, bot_shutdown) = if args.ignore_messages {
+        let (tx, _) = oneshot::channel();
+
+        (pin_dyn!(async { Ok(()) }), tx)
+    } else {
+        let (tx, rx) = oneshot::channel();
+
+        let handle = tokio::spawn(bot::run(
+            bot.clone(),
+            DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
+            args.allris_url.clone(),
+            args.generate_admin_token,
+            rx,
+        ));
+
+        (pin_dyn!(handle), tx)
+    };
+
     let scraper = allris::scraper(
         args.allris_url,
         Duration::from_secs(args.update_interval),
         db_client.clone(),
     );
 
-    tokio::spawn(scraper);
+    let scraper_handle = tokio::spawn(scraper);
 
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let mut broadcaster_handle = tokio::spawn(broadcast_task(bot, db_client, ctrl_rx));
@@ -176,22 +184,28 @@ async fn main() -> ExitCode {
         .await
         .expect("Unable to listen for shutdown signal");
 
-    log::info!("Shutting down ...");
-    //let _ = dispatcher.shutdown().await;
+    log::info!("Shutting down broadcasting");
 
+    let _ = scraper_handle.abort();
     let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
 
-    tokio::select! {
-        _ = &mut broadcaster_handle => {
-            return ExitCode::SUCCESS;
-        },
-        _ = tokio::signal::ctrl_c() => (),
-        _ = tokio::time::sleep(Duration::from_secs(20)) => ()
+    let success = tokio::select! {
+        _ = &mut broadcaster_handle => true,
+        _ = tokio::signal::ctrl_c() => false,
+        _ = tokio::time::sleep(Duration::from_secs(20)) => false
     };
 
-    log::warn!("Not all pending messages have been sent, shutting down anyway ...");
-    let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Hard);
-    let _ = broadcaster_handle.await;
+    if !success {
+        log::warn!("Not all pending messages have been sent, shutting down anyway ...");
+        let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Hard);
+        let _ = broadcaster_handle.await;
+    }
+
+    // We want users to be able to stop broadcasts even if we're in the process of shutting down,
+    // so this comes last
+    log::info!("Shutting down bot");
+    let _ = bot_shutdown.send(());
+    let _ = bot_handle.await;
 
     ExitCode::SUCCESS
 }

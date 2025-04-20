@@ -316,6 +316,7 @@ pub async fn run(
     database: SharedDatabaseConnection,
     allris_url: AllrisUrl,
     generate_admin_token: bool,
+    shutdown: oneshot::Receiver<()>,
 ) {
     let admin_token = generate_admin_token.then(|| {
         let token = AdminToken::new();
@@ -327,5 +328,5 @@ pub async fn run(
         .await
         .unwrap();
 
-    get_updates::handle_updates(bot, Arc::new(message_handler)).await
+    get_updates::handle_updates(bot, Arc::new(message_handler), shutdown).await
 }
