@@ -13,6 +13,7 @@ pub struct Message {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Tag {
+    Title,
     Dsnr,
     Art,
     Gremium,
@@ -22,7 +23,8 @@ pub enum Tag {
 }
 
 impl Tag {
-    pub const TAGS: &'static [Self] = &[
+    pub const TAGS: &[Self] = &[
+        Tag::Title,
         Tag::Dsnr,
         Tag::Art,
         Tag::Beteiligt,
@@ -33,6 +35,7 @@ impl Tag {
 
     pub fn label(&self) -> &'static str {
         match self {
+            Tag::Title => "Titel",
             Tag::Dsnr => "Drucksachen-Nummer",
             Tag::Art => "Art der Vorlage",
             Tag::Gremium => "Gremium",
@@ -44,6 +47,7 @@ impl Tag {
 
     pub fn description(&self) -> Option<&'static str> {
         match self {
+            Tag::Title => None,
             Tag::Dsnr => None,
             Tag::Art => None,
             Tag::Gremium => Some("Gremien, die zur Beratung der Vorlage vorgesehen sind"),
@@ -59,6 +63,10 @@ impl Tag {
 
     pub fn examples(&self) -> &'static [&'static str] {
         match self {
+            Tag::Title => &[
+                "Koalitionsantrag: Änderung Bebauungsplan 8423-16",
+                "Friedhofsentwicklungsplanung - Bad Godesberg",
+            ],
             Tag::Dsnr => &["252807", "242248-02 AA"],
             Tag::Art => &[
                 "Beschlussvorlage",

@@ -1,33 +1,40 @@
-mod admin;
 #[macro_use]
-mod commands;
-mod chat_shared;
-mod get_updates;
-mod text_received;
+mod macros;
 
-use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
+mod command_cancel;
+mod command_help;
+mod command_new_rule;
+mod command_remove_all_rules;
+mod command_remove_rule;
+mod command_rules;
+mod command_start;
+mod command_target;
+mod get_updates;
+mod keyboard;
+
+use std::fmt::Display;
+use std::sync::Arc;
 
 use frankenstein::AsyncTelegramApi;
-use frankenstein::methods::GetChatAdministratorsParams;
-use frankenstein::types::{KeyboardButton, Message};
-use get_updates::UpdateHandler;
+use frankenstein::methods::{
+    GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
+    SetMyShortDescriptionParams,
+};
+use frankenstein::types::{BotCommand, BotCommandScope, Message};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
-use self::admin::AdminToken;
-use crate::allris::AllrisUrl;
+use self::command_new_rule::{PatternInput, TagSelection};
+use self::command_remove_all_rules::ConfirmRemoveAllFilters;
+use self::command_remove_rule::RemoveFilterSelection;
+use self::command_target::ChannelSelection;
+use self::get_updates::UpdateHandler;
+use self::keyboard::remove_keyboard;
 use crate::database::{self, SharedDatabaseConnection};
-use crate::types::{Condition, Tag};
+use crate::escape_html;
 
-#[derive(Debug)]
-struct MessageHandler {
-    allris_url: AllrisUrl,
-    bot: crate::Bot,
-    database: SharedDatabaseConnection,
-    admin_token: Option<Mutex<AdminToken>>,
-    command_regex: Regex,
-}
+const SHORT_DESCRIPTION: &str = "Dieser Bot benachrichtigt dich, wenn im Ratsinformationssystem der Stadt Bonn neue Vorlagen veröffentlicht werden.";
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -39,8 +46,6 @@ enum Error {
     UnexpectedMessage,
     #[error("Topics not yet supported")]
     TopicsNotSupported,
-    #[error("Invalid input")]
-    InvalidInput,
     #[error("Unknown command {0}")]
     UnknownCommand(String),
     #[error("Telegram error: {0}")]
@@ -51,40 +56,237 @@ enum Error {
 
 type HandlerResult<T = ()> = Result<T, Error>;
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum DialogueState {
-    #[default]
-    Initial,
-    ReceiveChannelSelection {
-        request_id: i32,
-    },
-    ReceiveTag {
-        previous_conditions: Vec<Condition>,
-    },
-    ReceiveNegation {
-        previous_conditions: Vec<Condition>,
-        tag: Tag,
-    },
-    ReceivePattern {
-        previous_conditions: Vec<Condition>,
-        tag: Tag,
-        negation: bool,
-    },
-    DeleteFilter,
+macro_rules! commands {
+    ($($cmd:ident),*) => {
+        async fn handle_command(cx: HandleMessage<'_>, cmd: &str, param: Option<&str>) -> HandlerResult {
+            let cmd = cmd.to_ascii_lowercase();
+            match cmd.as_str() {
+                $(cmd if cmd == $cmd::COMMAND.name => $cmd::handle_command(cx, param).await,)+
+                _ => Err(Error::UnknownCommand(cmd))
+            }
+        }
+
+        fn commands() -> &'static [&'static Command] {
+            &[
+                $(&$cmd::COMMAND),+
+            ]
+        }
+    };
+    (@param param) => { , param };
+}
+
+macro_rules! states {
+    ($enum:ident; $($state:ident), * $(,)?) => {
+        #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+        enum $enum {
+            #[default]
+            Initial,
+            $($state($state)),*
+        }
+
+        impl $enum {
+            async fn handle_message(self, cx: HandleMessage<'_>, channel: Option<SelectedChannel>) -> HandlerResult {
+                match self {
+                    Self::Initial => Err(Error::UnexpectedMessage),
+                    $(Self::$state(state) => state.handle_message(cx, channel).await),*
+                }
+            }
+        }
+
+        $(
+        impl From<$state> for $enum {
+            fn from(x: $state) -> Self {
+                Self::$state(x)
+            }
+        }
+        )*
+    };
+}
+
+struct Command {
+    name: &'static str,
+    description: &'static str,
+    group_admin: bool,
+    group_member: bool,
+    private_chat: bool,
+
+    #[allow(unused)]
+    admin: bool,
+}
+
+commands! {
+    command_new_rule,
+    command_rules,
+    command_remove_rule,
+    command_remove_all_rules,
+
+    command_target,
+
+    command_cancel,
+    command_help,
+    command_start
+}
+
+states! {
+    DialogueState;
+    ConfirmRemoveAllFilters,
+    PatternInput,
+    TagSelection,
+    ChannelSelection,
+    RemoveFilterSelection
+}
+
+#[derive(Debug)]
+struct MessageHandler {
+    bot: crate::Bot,
+    database: SharedDatabaseConnection,
+    command_regex: Regex,
+    owner: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SelectedChannel {
+    chat_id: i64,
+    username: Option<String>,
+    title: Option<String>,
+}
+
+impl SelectedChannel {
+    fn channel_id(&self) -> u64 {
+        (self.chat_id + 1_000_000_000_000).unsigned_abs()
+    }
+
+    fn hyperlink_html(&self) -> impl Display {
+        struct Link<'a>(&'a SelectedChannel);
+
+        impl Display for Link<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                // make sure that username only contains allowed chars,
+                // then we know it's already html escaped
+                let username = self
+                    .0
+                    .username
+                    .as_deref()
+                    .filter(|name| name.chars().all(|x| x.is_ascii_alphanumeric() || x == '_'));
+
+                write!(f, "<a href=\"")?;
+
+                if let Some(username) = username {
+                    write!(f, "https://t.me/{username}")?;
+                } else {
+                    write!(f, "https://t.me/c/{}", self.0.channel_id())?;
+                };
+
+                write!(f, "\">„")?;
+
+                if let Some(title) = &self.0.title {
+                    let title = escape_html(title);
+                    write!(f, "{title}")?;
+                } else if let Some(username) = username {
+                    write!(f, "@{username}")?;
+                } else {
+                    write!(f, "<unbekannt>")?;
+                };
+
+                write!(f, "“</a>")
+            }
+        }
+
+        Link(self)
+    }
+
+    fn chat_selection_html(channel: &Option<Self>) -> impl Display {
+        struct ChatSelection<'a>(&'a Option<SelectedChannel>);
+
+        impl Display for ChatSelection<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self.0 {
+                    Some(channel) => write!(f, "📢 {}", channel.hyperlink_html()),
+                    None => write!(f, "💬 Dieser Chat"),
+                }
+            }
+        }
+
+        ChatSelection(channel)
+    }
+
+    fn chat_selection_html_accusative(channel: &Option<Self>) -> impl Display {
+        struct ChatSelection<'a>(&'a Option<SelectedChannel>);
+
+        impl Display for ChatSelection<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self.0 {
+                    Some(channel) => write!(f, "den Kanal {}", channel.hyperlink_html()),
+                    None => write!(f, "diesen Chat"),
+                }
+            }
+        }
+
+        ChatSelection(channel)
+    }
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Dialogue {
-    channel: Option<i64>,
+    channel: Option<SelectedChannel>,
     state: DialogueState,
 }
 
 impl MessageHandler {
+    async fn set_my_commands(
+        &self,
+        scope: BotCommandScope,
+        filter: impl Fn(&Command) -> bool,
+    ) -> HandlerResult {
+        let commands = commands()
+            .iter()
+            .copied()
+            .filter(|cmd| filter(cmd))
+            .map(|cmd| {
+                BotCommand::builder()
+                    .command(cmd.name)
+                    .description(cmd.description)
+                    .build()
+            })
+            .collect();
+
+        let params = SetMyCommandsParams::builder()
+            .scope(scope)
+            .commands(commands)
+            .build();
+
+        self.bot.set_my_commands(&params).await?;
+
+        Ok(())
+    }
+
+    pub async fn prepare_bot(&self) -> HandlerResult {
+        self.set_my_commands(BotCommandScope::AllPrivateChats, |cmd| cmd.private_chat)
+            .await?;
+        self.set_my_commands(BotCommandScope::AllGroupChats, |cmd| cmd.group_member)
+            .await?;
+        self.set_my_commands(BotCommandScope::AllChatAdministrators, |cmd| {
+            cmd.group_admin
+        })
+        .await?;
+
+        let params = SetMyDescriptionParams::builder()
+            .description(SHORT_DESCRIPTION)
+            .build();
+        self.bot.set_my_description(&params).await?;
+
+        let params = SetMyShortDescriptionParams::builder()
+            .short_description(SHORT_DESCRIPTION)
+            .build();
+        self.bot.set_my_short_description(&params).await?;
+
+        Ok(())
+    }
+
     async fn new(
         bot: crate::Bot,
         database: SharedDatabaseConnection,
-        allris_url: AllrisUrl,
-        admin_token: Option<AdminToken>,
+        owner: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let pattern = if let Some(username) = bot.get_me().await?.result.username {
             &format!(
@@ -101,13 +303,16 @@ impl MessageHandler {
             .dot_matches_new_line(true)
             .build()?;
 
-        Ok(Self {
-            allris_url,
+        let handler = Self {
             bot,
-            admin_token: admin_token.map(Mutex::new),
             database,
             command_regex,
-        })
+            owner,
+        };
+
+        handler.prepare_bot().await?;
+
+        Ok(handler)
     }
 
     fn parse_command<'a>(&self, text: &'a str) -> Option<(&'a str, Option<&'a str>)> {
@@ -125,34 +330,28 @@ struct HandleMessage<'a> {
     inner: &'a MessageHandler,
 }
 
-trait Selection<T> {
-    fn options(&self) -> impl Iterator<Item = (Cow<'static, str>, T)>;
-
-    fn matches(&self, response: &str) -> Option<T> {
-        self.options().find(|x| x.0 == response).map(|x| x.1)
-    }
-
-    fn buttons(&self) -> impl Iterator<Item = KeyboardButton> {
-        self.options()
-            .map(|(text, _)| KeyboardButton::builder().text(text).build())
-    }
-}
-
 impl HandleMessage<'_> {
     async fn handle(self) {
-        let result = if let Some(new_chat_id) = self.message.migrate_to_chat_id {
-            self.handle_migrate_to_chat_id(new_chat_id).await
-        } else if let Some(text) = &self.message.text {
-            if let Some((cmd, param)) = self.inner.parse_command(text) {
-                self.handle_command(&cmd, param).await
-            } else {
-                self.handle_text(text).await
+        let result = async {
+            if let Some(new_chat_id) = self.message.migrate_to_chat_id {
+                return self.handle_migrate_to_chat_id(new_chat_id).await;
             }
-        } else if let Some(chat) = &self.message.chat_shared {
-            self.handle_chat_shared(chat).await
-        } else {
-            Err(Error::UnexpectedMessage)
-        };
+
+            if let Some(text) = &self.message.text {
+                if self.message.message_thread_id.is_some() {
+                    return Err(Error::TopicsNotSupported);
+                }
+
+                if let Some((cmd, param)) = self.inner.parse_command(text) {
+                    return handle_command(self, cmd, param).await;
+                }
+            }
+
+            let dialogue = self.get_dialogue().await?;
+
+            dialogue.state.handle_message(self, dialogue.channel).await
+        }
+        .await;
 
         if let Err(e) = result {
             let _ = self.handle_error(e).await;
@@ -162,23 +361,22 @@ impl HandleMessage<'_> {
     async fn handle_error(self, e: Error) {
         let warn = match &e {
             Error::NotChannelAdmin(_, _) => {
-                let _ = self.remove_dialogue().await;
-                let _ = self
-                    .respond("Du hast für diesen Channel nicht die notwendigen Rechte!")
-                    .await;
+                _ = self.remove_dialogue().await;
+                _ = respond!(
+                    self,
+                    text = "Du hast für diesen Channel nicht die notwendigen Rechte!",
+                    reply_markup = remove_keyboard()
+                )
+                .await;
                 true
             }
             Error::TopicsNotSupported => {
-                let _ = self.respond("Topics werden noch nicht unterstützt").await;
-                false
-            }
-            Error::InvalidInput => {
-                let _ = self.respond("Ungültige Eingabe").await;
+                _ = respond!(self, text = "Topics werden noch nicht unterstützt").await;
                 false
             }
             Error::UnexpectedMessage => false,
             Error::Unauthorized(_, _) | Error::UnknownCommand(_) => {
-                let _ = self.respond("Unbekannter Befehl!").await;
+                _ = respond!(self, text = "Unbekannter Befehl!").await;
                 matches!(e, Error::Unauthorized(_, _))
             }
             Error::Telegram(_) => {
@@ -186,7 +384,7 @@ impl HandleMessage<'_> {
                 true
             }
             _ => {
-                let _ = self.respond("Ein interner Fehler ist aufgetreten :(").await;
+                _ = respond!(self, text = "Ein interner Fehler ist aufgetreten 😢").await;
                 true
             }
         };
@@ -198,23 +396,21 @@ impl HandleMessage<'_> {
         }
     }
 
-    async fn with_dialogue(
+    async fn update_dialogue(
         self,
-        f: impl AsyncFnOnce(Dialogue) -> HandlerResult<Dialogue>,
+        state: impl Into<DialogueState>,
+        channel: Option<SelectedChannel>,
     ) -> HandlerResult {
-        let dialogue = self.get_dialogue().await?;
-        let updated = f(dialogue.clone()).await?;
-        if updated != dialogue {
-            self.update_dialogue(&updated).await?;
-        }
-        Ok(())
-    }
+        let dialogue = Dialogue {
+            state: state.into(),
+            channel,
+        };
 
-    async fn update_dialogue(self, dialogue: &Dialogue) -> HandlerResult {
         self.inner
             .database
-            .update_dialogue(self.chat_id(), dialogue)
+            .update_dialogue(self.chat_id(), &dialogue)
             .await?;
+
         Ok(())
     }
 
@@ -225,7 +421,13 @@ impl HandleMessage<'_> {
             .get_dialogue(self.chat_id())
             .await?
             .unwrap_or_default();
+
         Ok(dialogue)
+    }
+
+    async fn reset_dialogue(self, channel: Option<SelectedChannel>) -> HandlerResult {
+        self.update_dialogue(DialogueState::default(), channel)
+            .await
     }
 
     async fn remove_dialogue(self) -> HandlerResult<()> {
@@ -246,7 +448,7 @@ impl HandleMessage<'_> {
         self.message.chat.id
     }
 
-    async fn selected_chat_id(self, channel: Option<i64>) -> HandlerResult<i64> {
+    async fn selected_chat(self, channel: &Option<SelectedChannel>) -> HandlerResult<i64> {
         macro_rules! user {
             ($member:expr, $($variant:ident),+) => {
                 match $member {
@@ -260,7 +462,7 @@ impl HandleMessage<'_> {
 
         if let Some(channel) = channel {
             let params = GetChatAdministratorsParams::builder()
-                .chat_id(channel)
+                .chat_id(channel.chat_id)
                 .build();
 
             let authorized = self
@@ -274,29 +476,13 @@ impl HandleMessage<'_> {
                 .any(|user| user.id.try_into() == Ok(self.chat_id()));
 
             if authorized {
-                Ok(channel)
+                Ok(channel.chat_id)
             } else {
-                Err(Error::NotChannelAdmin(self.chat_id(), channel))
+                Err(Error::NotChannelAdmin(self.chat_id(), channel.chat_id))
             }
         } else {
             Ok(self.chat_id())
         }
-    }
-
-    async fn require_admin_permissions(self, cmd: &str) -> HandlerResult<()> {
-        let authorized = self.inner.database.is_admin(self.chat_id()).await?;
-
-        if authorized {
-            Ok(())
-        } else {
-            Err(Error::Unauthorized(self.chat_id(), cmd.into()))
-        }
-    }
-
-    async fn respond(self, text: &str) -> HandlerResult {
-        let params = response_params!(self).text(text).build();
-        self.inner.bot.send_message(&params).await?;
-        Ok(())
     }
 }
 
@@ -314,17 +500,10 @@ impl UpdateHandler for Arc<MessageHandler> {
 pub async fn run(
     bot: crate::Bot,
     database: SharedDatabaseConnection,
-    allris_url: AllrisUrl,
-    generate_admin_token: bool,
+    owner: Option<String>,
     shutdown: oneshot::Receiver<()>,
 ) {
-    let admin_token = generate_admin_token.then(|| {
-        let token = AdminToken::new();
-        println!("Admin token (valid for 10 minutes): {token}");
-        token
-    });
-
-    let message_handler = MessageHandler::new(bot.clone(), database, allris_url, admin_token)
+    let message_handler = MessageHandler::new(bot.clone(), database, owner)
         .await
         .unwrap();
 

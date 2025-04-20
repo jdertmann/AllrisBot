@@ -17,7 +17,6 @@ const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
 const LAST_UPDATE_KEY: &str = "allrisbot:last_update";
-const ADMIN_KEY: &str = "allrisbot:admin";
 
 fn registered_chat_key(chat_id: i64) -> String {
     format!("allrisbot:registered_chats:{chat_id}")
@@ -142,17 +141,9 @@ impl DatabaseConnection {
         }
     }
 
-    pub async fn connect(client: Client, timeout: Option<Duration>) -> Result<Self> {
-        let mut this = DatabaseConnection::new(client, timeout);
-        let deadline = timeout.map(|x| Instant::now() + x);
-        timeout_at(deadline, this.get_connection()).await?;
-        Ok(this)
-    }
-
     pub fn shared(self) -> SharedDatabaseConnection {
         SharedDatabaseConnection {
             timeout: self.timeout,
-            client: self.client.clone(),
             connection: Mutex::new(self),
         }
     }
@@ -214,13 +205,6 @@ impl DatabaseConnection {
 pub struct SharedDatabaseConnection {
     connection: Mutex<DatabaseConnection>,
     timeout: Option<Duration>,
-    client: Client,
-}
-
-impl SharedDatabaseConnection {
-    pub async fn get_dedicated(&self) -> Result<DatabaseConnection> {
-        DatabaseConnection::connect(self.client.clone(), self.timeout).await
-    }
 }
 
 async fn timeout_at<T>(
@@ -491,7 +475,7 @@ implement_with_retry! {
     #[reset_connection_on_error]
     pub async fn update_filter<T>(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>) -> T) -> T {
         let key = registered_chat_key(chat_id);
-        let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
+        let script_content = include_str!("redis_scripts/add_subscription.lua");
 
         loop {
             let ((), current_filters): ((), Option<String>) = redis::pipe()
@@ -592,19 +576,6 @@ implement_with_retry! {
         } else {
             None
         }
-    }
-
-    pub async fn set_admin(connection, user_id: u64) {
-        connection.set(ADMIN_KEY, user_id).await?
-    }
-
-    pub async fn get_admin(connection) -> Option<u64> {
-        connection.get(ADMIN_KEY).await?
-    }
-
-    pub async fn is_admin(connection, chat_id: i64) -> bool {
-        let admin: Option<i64> = connection.get(ADMIN_KEY).await?;
-        admin == Some(chat_id)
     }
 
     pub async fn get_chat_state(

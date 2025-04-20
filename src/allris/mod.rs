@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::pin::pin;
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 use frankenstein::methods::SendMessageParams;
 use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
 use futures_util::{Stream, TryStreamExt};
@@ -53,6 +53,10 @@ fn generate_tags(dsnr: Option<&str>, paper: &Paper, data: &WebsiteData) -> Vec<(
     use Tag::*;
 
     let mut tags = vec![];
+
+    if let Some(title) = paper.name.as_ref() {
+        tags.push((Title, title.clone()))
+    }
 
     if let Some(dsnr) = dsnr {
         tags.push((Dsnr, dsnr.to_string()));
@@ -266,16 +270,6 @@ async fn send_notifications(
     }
 
     Ok(())
-}
-
-pub async fn scan_day(
-    allris_url: &AllrisUrl,
-    db: &mut DatabaseConnection,
-    day: NaiveDate,
-) -> Result<(), Error> {
-    let http_client = reqwest::Client::new();
-    let papers = oparl::get_day(&http_client, allris_url, day);
-    send_notifications(db, http_client, papers).await
 }
 
 pub async fn do_update(

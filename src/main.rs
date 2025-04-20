@@ -65,9 +65,9 @@ struct Args {
     #[arg(long)]
     ignore_messages: bool,
 
-    /// generate an admin token, which will be valid for 10 minutes from startup
-    #[arg(long, conflicts_with = "ignore_messages")]
-    generate_admin_token: bool,
+    /// Telegram username of the bot's owner
+    #[arg(short, long, value_parser = parse_owner_username)]
+    owner: Option<String>,
 
     /// increase verbosity
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -88,6 +88,18 @@ fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
     Ok(info)
 }
 
+fn parse_owner_username(mut input: &str) -> Result<String, String> {
+    if let Some(name) = input.strip_prefix('@') {
+        input = name;
+    }
+
+    if input.chars().all(|x| x.is_ascii_alphanumeric() || x == '_') {
+        Ok(input.into())
+    } else {
+        Err("Not a valid Telegram username".into())
+    }
+}
+
 fn init_logging(args: &Args) {
     let log_level = match (args.quiet, args.verbose) {
         (true, _) => log::LevelFilter::Off,
@@ -106,15 +118,17 @@ fn init_logging(args: &Args) {
         .init();
 }
 
-fn escape_html(input: &str) -> Cow<'_, str> {
+fn escape_html<'a, T: Into<Cow<'a, str>>>(input: T) -> Cow<'a, str> {
     const SPECIAL_CHARS: [char; 5] = ['&', '<', '>', '"', '\''];
-    const REPLACE: [(char, &'static str); 5] = [
+    const REPLACE: [(char, &str); 5] = [
         ('&', "&amp;"),
         ('<', "&lt;"),
         ('>', "&gt;"),
         ('"', "&quot;"),
         ('\'', "&#39;"),
     ];
+
+    let input = input.into();
 
     match input.find(SPECIAL_CHARS) {
         Some(index) => {
@@ -132,7 +146,7 @@ fn escape_html(input: &str) -> Cow<'_, str> {
 
             Cow::Owned(escaped)
         }
-        None => Cow::Borrowed(input),
+        None => input,
     }
 }
 
@@ -161,8 +175,7 @@ async fn main() -> ExitCode {
         let handle = tokio::spawn(bot::run(
             bot.clone(),
             DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
-            args.allris_url.clone(),
-            args.generate_admin_token,
+            args.owner,
             rx,
         ));
 
@@ -186,7 +199,7 @@ async fn main() -> ExitCode {
 
     log::info!("Shutting down broadcasting");
 
-    let _ = scraper_handle.abort();
+    scraper_handle.abort();
     let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
 
     let success = tokio::select! {

@@ -2,7 +2,6 @@ use std::future::ready;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Days, Duration, NaiveDate, SecondsFormat, TimeZone, Utc};
-use chrono_tz::Europe;
 use futures_util::{Stream, TryStreamExt};
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
@@ -16,8 +15,6 @@ use crate::lru_cache::{Cache, Lru};
 
 static ORGANIZATIONS: LazyLock<Cache<Url, (DateTime<Utc>, Organization), Lru<Url>>> =
     LazyLock::new(|| Cache::new(Lru::new(50)));
-
-const LOCAL_TZ: chrono_tz::Tz = Europe::Berlin;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,7 +96,7 @@ pub async fn get_organization(client: &reqwest::Client, id: &Url) -> Result<Orga
             id.clone(),
             |(t, _)| Utc::now() - t < Duration::days(3),
             async || {
-                let r: Organization = http_request(&client, id, Response::json).await?;
+                let r: Organization = http_request(client, id, Response::json).await?;
                 Ok((Utc::now(), r))
             },
         )
@@ -135,27 +132,6 @@ fn get_papers(
     ReceiverStream::new(rx)
         .map_ok(|vec| futures_util::stream::iter(vec.into_iter().map(Ok)))
         .try_flatten()
-}
-
-pub fn get_day(
-    client: &reqwest::Client,
-    url: &AllrisUrl,
-    day: NaiveDate,
-) -> impl Stream<Item = Result<Paper, Error>> + Send + Sync + Unpin + 'static {
-    let start = LOCAL_TZ
-        .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
-        .single()
-        .expect("no DST transition at midnight");
-
-    let end = LOCAL_TZ
-        .from_local_datetime(&day.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap())
-        .single()
-        .expect("no DST transition at midnight");
-
-    let url = endpoint_url(url, start, Some(end));
-
-    get_papers(client.clone(), url)
-        .try_filter(move |paper| ready(!paper.deleted && paper.date == Some(day)))
 }
 
 pub fn get_update(

@@ -6,6 +6,7 @@ use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::GetUpdatesParams;
 use frankenstein::types::{AllowedUpdate, Message};
 use frankenstein::updates::UpdateContent;
+use futures_util::FutureExt;
 use tokio::select;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinSet;
@@ -75,10 +76,16 @@ pub async fn handle_updates(
                         });
 
                     let handler = handler.clone();
-                    let acquiring = mutex.lock_owned();
+                    let mut acquiring = Box::pin(mutex.lock_owned());
+                    let guard = acquiring.as_mut().now_or_never();
 
                     let fut = async move {
-                        let guard = acquiring.await;
+                        let guard = if let Some(guard) = guard {
+                            guard
+                        } else {
+                            acquiring.await
+                        };
+
                         handler.handle_message(msg).await;
                         drop(guard)
                     };
