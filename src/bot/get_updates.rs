@@ -30,6 +30,8 @@ fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>
     *last_cleanup = now;
 }
 
+/// Gets new incoming messages and calls `handler` on them, while ensuring that no messages
+/// from the same chat are processed in parallel.
 pub async fn handle_updates(
     bot: crate::Bot,
     handler: impl UpdateHandler,
@@ -77,6 +79,9 @@ pub async fn handle_updates(
 
                     let handler = handler.clone();
                     let mut acquiring = Box::pin(mutex.lock_owned());
+
+                    // to ensure correct order, it's necessary to poll the future
+                    // once now (to enqueue it in the mutex' fifo queue)
                     let guard = acquiring.as_mut().now_or_never();
 
                     let fut = async move {
