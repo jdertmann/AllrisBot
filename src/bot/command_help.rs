@@ -68,7 +68,7 @@ Falls du komplexere Muster brauchst, \
 helfen dir <a href=\"https://regex101.com\">regex101.com</a> oder ChatGPT beim Ausprobieren und Erlernen von regulären Ausdrücken.
 
 👨‍💻 <b>Mehr Infos & Kontakt</b>  
-Der Quellcode dieses Bots ist öffentlich zugänglich: https://github.com/jdertmann/allrisbot\
+Der Quellcode dieses Bots ist öffentlich zugänglich: {repo}\
 {contact}",
     neue_regel = command_text!(command_new_rule),
     regeln = command_text!(command_rules),
@@ -76,7 +76,8 @@ Der Quellcode dieses Bots ist öffentlich zugänglich: https://github.com/jdertm
     alle_regeln_loeschen = command_text!(command_remove_all_rules),
     abbrechen=command_text!(command_cancel),
     hilfe = super::command_help::COMMAND.name,
-    start = super::command_start::COMMAND.name
+    start = super::command_start::COMMAND.name,
+    repo = env!("CARGO_PKG_REPOSITORY")
 )
 }
 
