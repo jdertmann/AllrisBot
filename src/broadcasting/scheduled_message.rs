@@ -8,11 +8,13 @@ use regex::Regex;
 use tokio::time::sleep;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 
-use super::{BroadcastResources, WorkerResult};
+use super::{ProcessNextResult, SharedDependencies};
 use crate::database::{self, StreamId};
 use crate::lru_cache::CacheItem;
 use crate::types::{ChatId, Condition, Filter, Message};
 
+/// error messages that imply we're not allowed to send messages
+/// to this chat in the future.
 const TELEGRAM_ERRORS: [&str; 14] = [
     "Bad Request: CHAT_WRITE_FORBIDDEN",
     "Bad Request: TOPIC_CLOSED",
@@ -63,12 +65,13 @@ impl Filter {
     }
 }
 
-pub struct MessageSender {
+/// A message that is scheduled to be sent to a certain chat
+pub struct ScheduledMessage {
     chat_id: ChatId,
     entry: CacheItem<(StreamId, Message)>,
 }
 
-impl MessageSender {
+impl ScheduledMessage {
     pub fn new(chat_id: ChatId, entry: CacheItem<(StreamId, Message)>) -> Self {
         Self { chat_id, entry }
     }
@@ -81,7 +84,8 @@ impl MessageSender {
         &self.entry.1
     }
 
-    pub async fn check_filters(&self, shared: &BroadcastResources) -> database::Result<bool> {
+    /// checks whether this message should be sent
+    pub async fn check_filters(&self, shared: &SharedDependencies) -> database::Result<bool> {
         let filters = shared.db.get_filters(self.chat_id).await?;
         for filter in filters {
             if filter.matches(self.message())? {
@@ -92,14 +96,15 @@ impl MessageSender {
         Ok(false)
     }
 
-    pub async fn acknowledge_message(&self, shared: &BroadcastResources) -> database::Result<bool> {
+    /// mark this message as sent in the database
+    pub async fn acknowledge_message(&self, shared: &SharedDependencies) -> database::Result<bool> {
         shared
             .db
             .acknowledge_message(self.chat_id, self.message_id())
             .await
     }
 
-    async fn unacknowledge_message(&self, shared: &BroadcastResources) -> database::Result<bool> {
+    async fn unacknowledge_message(&self, shared: &SharedDependencies) -> database::Result<bool> {
         shared
             .db
             .unacknowledge_message(self.chat_id, self.message_id())
@@ -108,10 +113,10 @@ impl MessageSender {
 
     async fn handle_response(
         &self,
-        shared: &BroadcastResources,
+        shared: &SharedDependencies,
         response: Result<(), RequestError>,
         backoff: Option<Duration>,
-    ) -> database::Result<ControlFlow<WorkerResult, Duration>> {
+    ) -> database::Result<ControlFlow<ProcessNextResult, Duration>> {
         let response = response.inspect_err(|e| log::warn!("Failed to send message: {e}"));
 
         macro_rules! retry {
@@ -119,13 +124,13 @@ impl MessageSender {
                 if self.unacknowledge_message(shared).await? {
                     return Ok(ControlFlow::Continue($dur));
                 } else {
-                    WorkerResult::OutOfSync
+                    ProcessNextResult::OutOfSync
                 }
             };
         }
 
         let result = match response {
-            Ok(()) => WorkerResult::Processed(self.message_id()),
+            Ok(()) => ProcessNextResult::Processed(self.message_id()),
             Err(RequestError::Api(e)) => match e {
                 ErrorResponse {
                     error_code: 401 | 404,
@@ -133,7 +138,7 @@ impl MessageSender {
                 } => {
                     log::error!("Invalid token! Was it revoked?");
                     shared.hard_shutdown.send_replace(true);
-                    WorkerResult::ShuttingDown
+                    ProcessNextResult::ShuttingDown
                 }
                 ErrorResponse {
                     parameters:
@@ -145,7 +150,7 @@ impl MessageSender {
                 } => {
                     self.unacknowledge_message(shared).await?;
                     shared.db.migrate_chat(self.chat_id, new_chat_id).await?;
-                    WorkerResult::MigratedTo(new_chat_id)
+                    ProcessNextResult::MigratedTo(new_chat_id)
                 }
                 ErrorResponse {
                     parameters:
@@ -161,14 +166,14 @@ impl MessageSender {
                     if TELEGRAM_ERRORS.contains(&description.as_str()) =>
                 {
                     shared.db.remove_subscription(self.chat_id).await?;
-                    WorkerResult::ChatStopped
+                    ProcessNextResult::ChatStopped
                 }
                 _ => {
                     if let Some(backoff) = backoff {
                         retry!(backoff)
                     } else {
                         log::error!("Sending failed definitely, not retrying!");
-                        WorkerResult::Processed(self.message_id())
+                        ProcessNextResult::Processed(self.message_id())
                     }
                 }
             },
@@ -177,7 +182,7 @@ impl MessageSender {
                     retry!(backoff)
                 } else {
                     log::error!("Sending failed definitely, not retrying!");
-                    WorkerResult::Processed(self.message_id())
+                    ProcessNextResult::Processed(self.message_id())
                 }
             }
         };
@@ -185,18 +190,19 @@ impl MessageSender {
         Ok(ControlFlow::Break(result))
     }
 
+    /// Sends a message. Will retry a number of times if it fails
     pub async fn send_message(
         &self,
-        shared: &BroadcastResources,
+        shared: &SharedDependencies,
         message_sent: &mut bool,
-    ) -> database::Result<WorkerResult> {
+    ) -> database::Result<ProcessNextResult> {
         let mut backoff = backoff_strategy();
 
         loop {
             *message_sent = false;
 
             if !self.acknowledge_message(shared).await? {
-                return Ok(WorkerResult::OutOfSync);
+                return Ok(ProcessNextResult::OutOfSync);
             }
 
             let response = self.try_send_message(shared).await;
@@ -212,7 +218,7 @@ impl MessageSender {
         }
     }
 
-    async fn try_send_message(&self, shared: &BroadcastResources) -> Result<(), RequestError> {
+    async fn try_send_message(&self, shared: &SharedDependencies) -> Result<(), RequestError> {
         let message = self.message();
 
         let mut params = message.request.clone();

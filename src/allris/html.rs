@@ -33,6 +33,7 @@ pub struct WebsiteData {
     pub already_discussed: bool,
 }
 
+/// extracts relevant information from a document's web page.
 pub async fn scrape_website(client: &Client, url: &Url) -> Result<WebsiteData, Error> {
     let html = http_request(client, url, Response::text).await?;
     let document = Html::parse_document(&html);

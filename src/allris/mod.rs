@@ -19,7 +19,7 @@ use url::Url;
 
 use self::html::{WebsiteData, scrape_website};
 use crate::database::{self, DatabaseConnection};
-use crate::escape_html as escape;
+use crate::escape_html;
 use crate::types::{Message, Tag};
 
 #[derive(Debug, Error)]
@@ -34,6 +34,7 @@ pub enum Error {
     MissingFields,
 }
 
+/// HTTP request with a few retries on failure
 async fn http_request<T>(
     client: &Client,
     url: &Url,
@@ -111,6 +112,8 @@ async fn get_gremien(
     Ok(gremien)
 }
 
+/// generates a notification message for the given `Paper`, complemented with information
+/// from the document's web page. Might return `None` if the document appears to be old.
 async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message> {
     let title = paper.name.as_deref()?;
     let dsnr = paper.reference.as_deref();
@@ -165,17 +168,17 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
     let mut msg = String::new();
 
     msg += "<b>";
-    msg += &escape(title);
+    msg += &escape_html(title);
     msg += "</b>\n";
 
     if let Some(paper_type) = paper.paper_type.as_deref() {
         msg += "\n📌 ";
-        msg += &escape(paper_type);
+        msg += &escape_html(paper_type);
     }
 
     if let Some(verfasser) = verfasser {
         msg += "\n👤 ";
-        msg += &escape(verfasser);
+        msg += &escape_html(verfasser);
     }
 
     if !gremien.is_empty() {
@@ -188,12 +191,12 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
             let gr = if let Some(url) = &gremium.1 {
                 format!(
                     "<a href=\"{}\">{}</a>",
-                    escape(url.as_str()),
-                    escape(&gremium.0),
+                    escape_html(url.as_str()),
+                    escape_html(&gremium.0),
                 )
                 .into()
             } else {
-                escape(&gremium.0)
+                escape_html(&gremium.0)
             };
 
             if gremium.2 {
@@ -208,7 +211,7 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
 
     if let Some(dsnr) = dsnr {
         msg += "\n📎 Ds.-Nr. ";
-        msg += &escape(dsnr);
+        msg += &escape_html(dsnr);
     }
 
     let create_button = |text: &str, url: &Url| {
@@ -263,6 +266,8 @@ async fn send_notifications(
 
     for (volfdnr, paper) in papers_map {
         if let Some(message) = generate_notification(&http_client, &paper).await {
+            // this will schedule the notification message and at the same time (atomically)
+            // add the volfdnr to the list of already handled volfdnrs.
             db.schedule_broadcast(&volfdnr, &message).await?;
         } else {
             db.add_known_volfdnr(&volfdnr).await?;
@@ -291,8 +296,10 @@ pub async fn do_update(
     Ok(())
 }
 
+/// Represents the url to an Allris instance
 #[derive(Debug, Clone)]
 pub struct AllrisUrl {
+    // invariant: the url has a trailing backslash
     url: Url,
 }
 
@@ -309,16 +316,16 @@ impl AllrisUrl {
     }
 }
 
+/// Regularly checks for new documents, generates notification messages and stores them in the database
 pub async fn scraper(allris_url: AllrisUrl, update_interval: Duration, db: redis::Client) {
-    let db_timeout = Some(Duration::from_secs(10));
-
     let mut interval = interval(update_interval);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay); // not that it will probably happen
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         interval.tick().await;
 
         log::info!("Updating ...");
+        let db_timeout = Some(Duration::from_secs(10));
         let mut db_conn = DatabaseConnection::new(db.clone(), db_timeout);
         match do_update(&allris_url, &mut db_conn).await {
             Ok(()) => log::info!("Update finished!"),

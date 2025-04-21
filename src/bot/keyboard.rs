@@ -1,3 +1,5 @@
+//! Provides an abstraction over reply keyboards
+
 use std::borrow::Cow;
 
 use frankenstein::types::{
