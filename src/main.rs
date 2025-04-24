@@ -1,3 +1,13 @@
+//! Telegram bot that notifies users about newly published documents in the Allris 4 council information system.
+//!
+//! This application consists of three main components:
+//!
+//! 1. **Allris Scraper ([`allris`] module)**: Regularly fetches the latest updates from the council information system's [OParl API](https://oparl.org/).
+//! 2. **Broadcasting ([`broadcasting`] module)**: Sends scheduled notification messages to subscribed users.
+//! 3. **Bot ([`bot`] module)**: Handles user interactions with the Telegram bot, including responding to messages and managing configurations.
+//!
+//! The application uses a Redis database ([`database`] module) to store its state and scheduled notifications.
+
 mod allris;
 mod bot;
 mod broadcasting;
@@ -7,7 +17,6 @@ mod types;
 
 use std::borrow::Cow;
 use std::error::Error;
-use std::pin::{Pin, pin};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -81,7 +90,7 @@ struct Args {
 fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
     let url = Url::parse(input).map_err(|e| e.to_string())?;
     let info = url.into_connection_info().map_err(
-        // the redis crate implements no other way to get to a human-friendly error description
+        // the `redis` crate implements no other way to get to a human-friendly error description
         #[allow(deprecated)]
         |e| e.description().to_string(),
     )?;
@@ -156,19 +165,14 @@ async fn main() -> ExitCode {
 
     init_logging(&args);
 
+    // this will actually not establish a database connection, and will also not fail
+    // since `args.redis_url` is already of type `ConnectionInfo`
     let db_client = redis::Client::open(args.redis_url).unwrap();
     let bot = frankenstein::client_reqwest::Bot::new(&args.bot_token);
 
-    macro_rules! pin_dyn {
-        ($x:expr) => {
-            pin!($x) as Pin<&mut dyn Future<Output = _>>
-        };
-    }
-
-    let (bot_handle, bot_shutdown) = if args.ignore_messages {
-        let (tx, _) = oneshot::channel();
-
-        (pin_dyn!(async { Ok(()) }), tx)
+    // star bot, the unless `--ignore-messages` flag is set
+    let bot_shutdown = if args.ignore_messages {
+        None
     } else {
         let (tx, rx) = oneshot::channel();
 
@@ -179,29 +183,34 @@ async fn main() -> ExitCode {
             rx,
         ));
 
-        (pin_dyn!(handle), tx)
+        Some((handle, tx))
     };
 
-    let scraper = allris::scraper(
+    // start Allris scraper task
+    let scraper_task = allris::scraper(
         args.allris_url,
         Duration::from_secs(args.update_interval),
         db_client.clone(),
     );
+    let scraper_handle = tokio::spawn(scraper_task);
 
-    let scraper_handle = tokio::spawn(scraper);
-
+    // start the broadcasting task
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let mut broadcaster_handle = tokio::spawn(broadcast_task(bot, db_client, ctrl_rx));
 
+    // listen for CTRL+C
     tokio::signal::ctrl_c()
         .await
         .expect("Unable to listen for shutdown signal");
 
-    log::info!("Shutting down broadcasting");
+    log::info!("Shutting down ...");
 
+    // enqueueing messages is transactional, so we can safely abort the task
     scraper_handle.abort();
-    let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
 
+    // wait until message queue is empty, unless CTRL+C is pressed a second time
+    // or 20 seconds have passed
+    let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
     let success = tokio::select! {
         _ = &mut broadcaster_handle => true,
         _ = tokio::signal::ctrl_c() => false,
@@ -216,9 +225,11 @@ async fn main() -> ExitCode {
 
     // We want users to be able to stop broadcasts even if we're in the process of shutting down,
     // so this comes last
-    log::info!("Shutting down bot");
-    let _ = bot_shutdown.send(());
-    let _ = bot_handle.await;
+    if let Some((handle, tx)) = bot_shutdown {
+        log::info!("Shutting down bot");
+        let _ = tx.send(());
+        let _ = handle.await;
+    }
 
     ExitCode::SUCCESS
 }

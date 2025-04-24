@@ -11,8 +11,6 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::types::{Filter, Message};
 
-// define keys
-
 const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
@@ -49,6 +47,10 @@ macro_rules! script {
     }};
 }
 
+/// Represents an id of [redis stream](https://redis.io/docs/latest/develop/data-types/streams/) entries.
+///
+/// When automatically generated, the first number is the current millisec timestamp, the second number
+/// is counting upwards per millisec. Therefore, stream entries are ordered by their id.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamId(u64, u64);
 
@@ -123,6 +125,7 @@ impl FromRedisValue for Message {
     }
 }
 
+/// (Exclusive) connection to a redis database. Reconnects if the connection is lost
 #[derive(Debug)]
 pub struct DatabaseConnection {
     client: Client,
@@ -132,6 +135,7 @@ pub struct DatabaseConnection {
 }
 
 impl DatabaseConnection {
+    /// Creates this struct without actually connecting
     pub fn new(client: Client, timeout: Option<Duration>) -> Self {
         Self {
             client,
@@ -158,6 +162,10 @@ impl DatabaseConnection {
         }
     }
 
+    /// handles an error response
+    ///
+    /// Returns `Ok` if/once the request should be retried, or an Error that should
+    /// be propagated to the caller
     async fn handle_error(&mut self, err: Error, deadline: Option<Instant>) -> Result<()> {
         let err = match err {
             Error::Redis(err) => err,
@@ -168,6 +176,7 @@ impl DatabaseConnection {
         self.retry_counter += 1;
 
         match err.retry_method() {
+            // immediate retry only on the first attempt
             RetryMethod::RetryImmediately if self.retry_counter == 1 => return Ok(()),
             RetryMethod::WaitAndRetry | RetryMethod::RetryImmediately => {
                 // reconnect once in a while if it doesn't work
@@ -181,6 +190,7 @@ impl DatabaseConnection {
             _ => return Err(err.into()),
         }
 
+        // backoff time is exponential but limited to 15s +/- jitter
         let duration_ms = (10 * 5_u64.pow(self.retry_counter.min(5))).min(15_000);
         let retry_at = Instant::now()
             + Duration::from_millis(duration_ms).mul_f64(0.75 + rand::random::<f64>() / 2.);
@@ -362,6 +372,8 @@ pub enum ChatState {
     Stopped,
 }
 
+// all operations are designed to be more or less idempotent, or at least not having severe consequences
+// if they are executed twice, so it's always good to retry if it fails.
 implement_with_retry! {
     DatabaseConnection, SharedDatabaseConnection;
 
@@ -620,6 +632,8 @@ implement_with_retry! {
 
 }
 
+// the following function should only be called on an exclusively owned
+// connection as it would block the connection for everyone else
 implement_with_retry! {
     DatabaseConnection;
 

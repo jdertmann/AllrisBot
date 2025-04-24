@@ -1,14 +1,17 @@
 [package]
 name = "allrisbot"
+description = "Telegram bot that notifies users about newly published documents in the Allris 4 council information system"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/jdertmann/AllrisBot"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"
 frankenstein = { version = "0.40.0", features = ["client-reqwest"] }
-futures-util = "0.3"
+futures-util = { default-features = false, version = "0.3" }
 log = "0.4"
 rand = "0.9.0"
 redis = { version = "0.30", default-features = false, features = ["keep-alive", "tokio-comp", "script", "json"] }

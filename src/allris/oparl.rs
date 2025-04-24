@@ -15,6 +15,8 @@ use crate::lru_cache::{Cache, Lru};
 
 type LruCache<K, V> = Cache<K, V, Lru<K>>;
 
+/// Caches calls to the api's `organization` endpoints, as these information will
+/// rarely change.
 static ORGANIZATIONS: LazyLock<LruCache<Url, (DateTime<Utc>, Organization)>> =
     LazyLock::new(|| Cache::new(Lru::new(50)));
 
@@ -69,6 +71,7 @@ struct Links {
     next: Option<Url>,
 }
 
+/// Converts a timestamp to the format specified in the OParl reference
 fn to_rfc3339(t: DateTime<impl TimeZone>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, false)
 }
