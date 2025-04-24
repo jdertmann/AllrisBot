@@ -149,6 +149,7 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
     ) -> Result<CacheItem<V>, Err> {
         let cell = self.inner.lock().await.get(key);
 
+        #[allow(clippy::redundant_closure)]
         cell.get_or_try_init(|| init()).await?;
 
         Ok(CacheItem(cell))
@@ -162,6 +163,7 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
     ) -> Result<CacheItem<V>, Err> {
         let cell = self.inner.lock().await.get_if_valid(key, is_valid);
 
+        #[allow(clippy::redundant_closure)]
         cell.get_or_try_init(|| init()).await?;
 
         Ok(CacheItem(cell))

@@ -38,8 +38,6 @@ const SHORT_DESCRIPTION: &str = "Dieser Bot benachrichtigt dich, wenn im Ratsinf
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("User {0} is not permitted to run command {1}")]
-    Unauthorized(i64, String),
     #[error("User {0} is not admin of channel {1}")]
     NotChannelAdmin(i64, i64),
     #[error("Unexpected message")]
@@ -375,9 +373,9 @@ impl HandleMessage<'_> {
                 false
             }
             Error::UnexpectedMessage => false,
-            Error::Unauthorized(_, _) | Error::UnknownCommand(_) => {
+            Error::UnknownCommand(_) => {
                 _ = respond!(self, text = "Unbekannter Befehl!").await;
-                matches!(e, Error::Unauthorized(_, _))
+                false
             }
             Error::Telegram(_) => {
                 // not responding, as it will presumably not work
