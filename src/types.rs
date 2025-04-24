@@ -1,21 +1,19 @@
 use std::fmt::Display;
 
-use regex::Regex;
+use frankenstein::methods::SendMessageParams;
 use serde::{Deserialize, Serialize};
-use teloxide::types::{InlineKeyboardButton, ParseMode};
 
 pub type ChatId = i64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub text: String,
-    pub parse_mode: ParseMode,
-    pub buttons: Vec<InlineKeyboardButton>,
+    pub request: SendMessageParams,
     pub tags: Vec<(Tag, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Tag {
+    Title,
     Dsnr,
     Art,
     Gremium,
@@ -25,7 +23,8 @@ pub enum Tag {
 }
 
 impl Tag {
-    pub const TAGS: &'static [Self] = &[
+    pub const TAGS: &[Self] = &[
+        Tag::Title,
         Tag::Dsnr,
         Tag::Art,
         Tag::Beteiligt,
@@ -36,6 +35,7 @@ impl Tag {
 
     pub fn label(&self) -> &'static str {
         match self {
+            Tag::Title => "Titel",
             Tag::Dsnr => "Drucksachen-Nummer",
             Tag::Art => "Art der Vorlage",
             Tag::Gremium => "Gremium",
@@ -47,24 +47,30 @@ impl Tag {
 
     pub fn description(&self) -> Option<&'static str> {
         match self {
+            Tag::Title => None,
             Tag::Dsnr => None,
             Tag::Art => None,
-            Tag::Gremium => Some("Gremien, die zur Beratung der Vorlage vorgesehen sind."),
+            Tag::Gremium => Some("Gremien, die zur Beratung der Vorlage vorgesehen sind"),
             Tag::Verfasser => {
-                Some("Personen oder Fraktionen, die den Antrag oder die Frage gestellt haben.")
+                Some("Personen oder Fraktionen, die den Antrag oder die Frage gestellt haben")
             }
             Tag::Federführend => None,
             Tag::Beteiligt => Some(
-                "Jedes an der Vorlage beteiligte Amt. Das schließt auch das federführende Amt mit ein.",
+                "jedes an der Vorlage beteiligte Amt; das schließt auch das federführende Amt mit ein",
             ),
         }
     }
 
     pub fn examples(&self) -> &'static [&'static str] {
         match self {
+            Tag::Title => &[
+                "Koalitionsantrag: Änderung Bebauungsplan 8423-16",
+                "Friedhofsentwicklungsplanung - Bad Godesberg",
+            ],
             Tag::Dsnr => &["252807", "242248-02 AA"],
             Tag::Art => &[
-                "Beschlussvorlage, Stellungnahme der Verwaltung",
+                "Beschlussvorlage",
+                "Stellungnahme der Verwaltung",
                 "Anregungen und Beschwerden",
             ],
             Tag::Gremium => &[
@@ -88,32 +94,10 @@ impl Tag {
     }
 }
 
-mod serde_regex {
-    use regex::Regex;
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &regex::Regex, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(value.as_str())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<regex::Regex, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = <&str>::deserialize(deserializer)?;
-        Regex::new(s).map_err(D::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Condition {
     pub tag: Tag,
-    #[serde(with = "serde_regex")]
-    pub pattern: Regex,
+    pub pattern: String,
     pub negate: bool,
 }
 
@@ -129,7 +113,7 @@ impl Display for Condition {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Filter {
     pub conditions: Vec<Condition>,
 }
@@ -139,9 +123,8 @@ impl Display for Filter {
         if self.conditions.is_empty() {
             writeln!(f, "Alle Vorlagen")?;
         } else {
-            for (i, condition) in self.conditions.iter().enumerate() {
-                let and = if i == 0 { "  " } else { "& " };
-                writeln!(f, "{and}{condition}")?;
+            for condition in &self.conditions {
+                writeln!(f, "• {condition}")?;
             }
         }
 

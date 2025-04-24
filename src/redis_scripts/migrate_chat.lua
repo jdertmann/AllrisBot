@@ -1,6 +1,8 @@
 -- KEYS[1] = REGISTERED_CHATS_KEY
--- KEYS[2] = broadcast_last_message_key(old_chat_id)
--- KEYS[3] = broadcast_last_message_key(new_chat_id)
+-- KEYS[2] = registered_chat_key(old_chat_id)
+-- KEYS[3] = registered_chat_key(new_chat_id)
+-- KEYS[4] = dialogue_key(old_chat_id)
+-- KEYS[5] = dialogue_key(new_chat_id)
 -- ARGV[1] = old_chat_id
 -- ARGV[2] = new_chat_id
 
@@ -30,6 +32,11 @@ local function max_stream_id(id1, id2)
     else
         return id1
     end
+end
+
+local old_dialogue = redis.call("GET", KEYS[4])
+if old_dialogue then
+    redis.call("SET", KEYS[5], old_dialogue, "NX", "EX", 60 * 60 * 24)
 end
 
 local old_chat_removed = redis.call("SREM", KEYS[1], ARGV[1])
