@@ -2,11 +2,11 @@ use std::fmt::{self, Debug};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use futures_util::lock::Mutex;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, Client, Cmd, FromRedisValue, RedisWrite, RetryMethod};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep_until};
 
 use crate::types::{Filter, Message};
@@ -17,7 +17,6 @@ const REGISTERED_CHATS_KEY: &str = "allrisbot:registered_chats";
 const KNOWN_ITEMS_KEY: &str = "allrisbot:known_items";
 const SCHEDULED_MESSAGES_KEY: &str = "allrisbot:scheduled_messages";
 const LAST_UPDATE_KEY: &str = "allrisbot:last_update";
-const ADMIN_KEY: &str = "allrisbot:admin";
 
 fn registered_chat_key(chat_id: i64) -> String {
     format!("allrisbot:registered_chats:{chat_id}")
@@ -33,6 +32,8 @@ pub enum Error {
     Redis(#[from] redis::RedisError),
     #[error("database timeout")]
     Timeout,
+    #[error("regex error: {0}")]
+    Regex(#[from] regex::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -140,17 +141,9 @@ impl DatabaseConnection {
         }
     }
 
-    pub async fn connect(client: Client, timeout: Option<Duration>) -> Result<Self> {
-        let mut this = DatabaseConnection::new(client, timeout);
-        let deadline = timeout.map(|x| Instant::now() + x);
-        timeout_at(deadline, this.get_connection()).await?;
-        Ok(this)
-    }
-
     pub fn shared(self) -> SharedDatabaseConnection {
         SharedDatabaseConnection {
             timeout: self.timeout,
-            client: self.client.clone(),
             connection: Mutex::new(self),
         }
     }
@@ -212,13 +205,6 @@ impl DatabaseConnection {
 pub struct SharedDatabaseConnection {
     connection: Mutex<DatabaseConnection>,
     timeout: Option<Duration>,
-    client: Client,
-}
-
-impl SharedDatabaseConnection {
-    pub async fn get_dedicated(&self) -> Result<DatabaseConnection> {
-        DatabaseConnection::connect(self.client.clone(), self.timeout).await
-    }
 }
 
 async fn timeout_at<T>(
@@ -237,9 +223,9 @@ async fn timeout_at<T>(
 macro_rules! implement_with_retry {
     (
         $conn_struct:ident,
-        $conn_struct_shared: ident;
+        $conn_struct_shared:ident;
         $(
-            $(#[$attr:ident])?
+            $(#[$attr:ident])*
             $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
             (
                 $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
@@ -264,7 +250,7 @@ macro_rules! implement_with_retry {
                             return Ok(Some(r));
                         }
                         Err(e) => {
-                            implement_with_retry!(@reset $($attr)?, conn);
+                            implement_with_retry!(@reset $($attr)*, conn);
                             conn.handle_error(e, deadline).await?
                         }
                     }
@@ -315,8 +301,57 @@ macro_rules! implement_with_retry {
             )+
         }
     };
+    (
+        $conn_struct:ident;
+        $(
+            $(#[$attr:ident])*
+            $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
+            (
+                $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
+            ) $(-> $return_type:ty)?
+            $body:block
+        )+
+    ) => {
+        impl $conn_struct {
+        $(
+            #[allow(dead_code)]
+            $vis async fn $fn_name $(< $t $(: $bound)?>)?  (
+                &mut self,
+                $($param_name: $param_type),*
+            ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
+                let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
+
+                loop {
+                    let request = async {
+                        let request = async {
+                            let $conn = self.get_connection().await?;
+                            Ok($body)
+                        };
+
+                        match timeout_at(deadline, request).await {
+                            Ok(r) => {
+                                self.retry_counter = 0;
+                                return Ok::<_, Error>(Some(r));
+                            }
+                            Err(e) => {
+                                implement_with_retry!(@reset $($attr)*, conn);
+                                self.handle_error(e, deadline).await?
+                            }
+                        }
+
+                        Ok(None)
+                    };
+
+                    if let Some(r) = request.await? {
+                        return Ok(r)
+                    }
+                }
+            }
+        )+
+        }
+    };
     (@reset reset_connection_on_error, $conn:expr) => { $conn.connection = None; };
-    (@reset , $conn:expr ) => { };
+    (@reset $($x:ident)?, $conn:expr ) => { };
     (@ret $t:ty) =>  { $t };
     (@ret) => { () };
 }
@@ -391,6 +426,8 @@ implement_with_retry! {
             .key(REGISTERED_CHATS_KEY)
             .key(registered_chat_key(old_chat_id))
             .key(registered_chat_key(new_chat_id))
+            .key(dialogue_key(old_chat_id))
+            .key(dialogue_key(new_chat_id))
             .arg(old_chat_id)
             .arg(new_chat_id)
             .invoke_async(connection)
@@ -438,7 +475,7 @@ implement_with_retry! {
     #[reset_connection_on_error]
     pub async fn update_filter<T>(connection, chat_id: i64, update: &impl Fn(&mut Vec<Filter>) -> T) -> T {
         let key = registered_chat_key(chat_id);
-        let script_content : &'static str = include_str!("redis_scripts/add_subscription.lua");
+        let script_content = include_str!("redis_scripts/add_subscription.lua");
 
         loop {
             let ((), current_filters): ((), Option<String>) = redis::pipe()
@@ -488,41 +525,21 @@ implement_with_retry! {
         }
     }
 
-    pub async fn next_message_ready(
-        connection,
-        stream_id: Option<StreamId>,
+    pub async fn current_message_id(
+        connection
     ) -> StreamId {
-        loop {
-            let r = if let Some(stream_id) = stream_id {
-                let response: Vec<((), Vec<(StreamId, Message)>)> = redis::cmd("XREAD")
-                    .arg("BLOCK").arg(10000)
-                    .arg("COUNT").arg(1)
-                    .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
-                    .query_async(connection)
-                    .await?;
+        let response: Vec<(StreamId, ())> = redis::cmd("XREVRANGE")
+            .arg(SCHEDULED_MESSAGES_KEY)
+            .arg("+").arg("-")
+            .arg("COUNT").arg(1)
+            .query_async(connection)
+            .await?;
 
-                response.into_iter().next().map(|(_, v)| v)
-            } else {
-                let response: Vec<(StreamId, Message)> = redis::cmd("XREVRANGE")
-                    .arg(SCHEDULED_MESSAGES_KEY)
-                    .arg("+").arg("-")
-                    .arg("COUNT").arg(1)
-                    .query_async(connection)
-                    .await?;
-
-                Some(response)
-            };
-
-            let id = r
-                .and_then(|v| v.into_iter().next())
-                .map(|(id, _)| id);
-
-            if let Some(id) = id {
-                break id
-            } else if stream_id.is_none() {
-                break StreamId::ZERO;
-            }
-        }
+        response
+            .into_iter()
+            .next()
+            .map(|(id, _)| id)
+            .unwrap_or(StreamId::ZERO)
     }
 
     pub async fn get_next_message(
@@ -561,15 +578,6 @@ implement_with_retry! {
         }
     }
 
-    pub async fn set_admin(connection, chat_id: i64) {
-        connection.set(ADMIN_KEY, chat_id).await?
-    }
-
-    pub async fn is_admin(connection, chat_id: i64) -> bool {
-        let admin: Option<i64> = connection.get(ADMIN_KEY).await?;
-        admin == Some(chat_id)
-    }
-
     pub async fn get_chat_state(
         connection,
         chat_id: i64,
@@ -597,11 +605,44 @@ implement_with_retry! {
     pub async fn get_dialogue<D: DeserializeOwned>(connection, chat_id: i64) -> Option<D> {
         let string : Option<String> = connection.get(dialogue_key(chat_id)).await?;
         if let Some(string) = string {
-            let deserialized = serde_json::from_str(&string)?;
-            Some(deserialized)
+            match serde_json::from_str(&string) {
+                Ok(deserialized) => Some(deserialized),
+                Err(e) => {
+                    log::warn!("Deleting malformed dialogue for chat {chat_id}");
+                    let _ : redis::RedisResult<()> = connection.del(dialogue_key(chat_id)).await;
+                    return Err(e.into());
+                }
+            }
         } else {
             None
         }
     }
 
+}
+
+implement_with_retry! {
+    DatabaseConnection;
+
+    pub async fn next_message_id_blocking(
+        connection,
+        stream_id: StreamId,
+    ) -> StreamId {
+        loop {
+            let response: Vec<((), Vec<(StreamId, ())>)> = redis::cmd("XREAD")
+                .arg("BLOCK").arg(10000)
+                .arg("COUNT").arg(1)
+                .arg("STREAMS").arg(SCHEDULED_MESSAGES_KEY).arg(stream_id)
+                .query_async(connection)
+                .await?;
+
+            let id = response.into_iter()
+                .next()
+                .and_then(|(_, v)| v.into_iter().next())
+                .map(|(id, _)| id);
+
+            if let Some(id) = id {
+                break id
+            }
+        }
+    }
 }

@@ -5,12 +5,12 @@ use std::collections::BTreeMap;
 use std::pin::pin;
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
+use frankenstein::methods::SendMessageParams;
+use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
 use futures_util::{Stream, TryStreamExt};
 use oparl::{Consultation, Paper, get_organization};
 use reqwest::{Client, Response};
-use teloxide::types::InlineKeyboardButton;
-use teloxide::utils::html::{bold, escape, link};
 use thiserror::Error;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_retry::RetryIf;
@@ -19,6 +19,7 @@ use url::Url;
 
 use self::html::{WebsiteData, scrape_website};
 use crate::database::{self, DatabaseConnection};
+use crate::escape_html as escape;
 use crate::types::{Message, Tag};
 
 #[derive(Debug, Error)]
@@ -52,6 +53,10 @@ fn generate_tags(dsnr: Option<&str>, paper: &Paper, data: &WebsiteData) -> Vec<(
     use Tag::*;
 
     let mut tags = vec![];
+
+    if let Some(title) = paper.name.as_ref() {
+        tags.push((Title, title.clone()))
+    }
 
     if let Some(dsnr) = dsnr {
         tags.push((Dsnr, dsnr.to_string()));
@@ -157,7 +162,11 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         _ => None,
     };
 
-    let mut msg = bold(title) + "\n";
+    let mut msg = String::new();
+
+    msg += "<b>";
+    msg += &escape(title);
+    msg += "</b>\n";
 
     if let Some(paper_type) = paper.paper_type.as_deref() {
         msg += "\n📌 ";
@@ -176,17 +185,24 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
                 msg += " | ";
             }
 
-            let mut gr = if let Some(url) = &gremium.1 {
-                link(url.as_str(), &gremium.0)
+            let gr = if let Some(url) = &gremium.1 {
+                format!(
+                    "<a href=\"{}\">{}</a>",
+                    escape(url.as_str()),
+                    escape(&gremium.0),
+                )
+                .into()
             } else {
                 escape(&gremium.0)
             };
 
             if gremium.2 {
-                gr = bold(&gr);
+                msg += "<b>";
+                msg += &gr;
+                msg += "</b>";
+            } else {
+                msg += &gr;
             }
-
-            msg += &gr;
         }
     }
 
@@ -195,20 +211,30 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         msg += &escape(dsnr);
     }
 
-    let mut buttons = vec![InlineKeyboardButton::url("🌐 Allris", url.clone())];
+    let create_button = |text: &str, url: &Url| {
+        InlineKeyboardButton::builder()
+            .text(text)
+            .url(url.to_string())
+            .build()
+    };
+
+    let mut buttons = vec![create_button("🌐 Allris", url)];
     buttons.extend(
         paper
             .main_file
             .as_ref()
-            .map(|file| InlineKeyboardButton::url("📄 PDF", file.access_url.clone())),
+            .map(|file| create_button("📄 PDF", &file.access_url)),
     );
+    let keyboard = InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![buttons])
+        .build();
+    let request = SendMessageParams::builder()
+        .chat_id(0)
+        .text(msg)
+        .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard))
+        .build();
 
-    Some(Message {
-        text: msg,
-        parse_mode: teloxide::types::ParseMode::Html,
-        buttons,
-        tags,
-    })
+    Some(Message { request, tags })
 }
 
 async fn send_notifications(
@@ -244,16 +270,6 @@ async fn send_notifications(
     }
 
     Ok(())
-}
-
-pub async fn scan_day(
-    allris_url: &AllrisUrl,
-    db: &mut DatabaseConnection,
-    day: NaiveDate,
-) -> Result<(), Error> {
-    let http_client = reqwest::Client::new();
-    let papers = oparl::get_day(&http_client, allris_url, day);
-    send_notifications(db, http_client, papers).await
 }
 
 pub async fn do_update(

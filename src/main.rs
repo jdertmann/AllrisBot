@@ -1,27 +1,26 @@
-mod admin;
 mod allris;
-mod bot_commands;
+mod bot;
 mod broadcasting;
 mod database;
 mod lru_cache;
 mod types;
 
+use std::borrow::Cow;
 use std::error::Error;
+use std::pin::{Pin, pin};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use admin::AdminToken;
 use broadcasting::broadcast_task;
 use clap::Parser;
+use database::DatabaseConnection;
 use redis::{ConnectionInfo, IntoConnectionInfo};
-use teloxide::adaptors::CacheMe;
-use teloxide::prelude::RequesterExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 use crate::allris::AllrisUrl;
 
-type Bot = CacheMe<teloxide::Bot>;
+type Bot = frankenstein::client_reqwest::Bot;
 
 /// Telegram bot that notifies about newly published documents in the Allris 4 council information system.
 #[derive(Parser)]
@@ -66,9 +65,9 @@ struct Args {
     #[arg(long)]
     ignore_messages: bool,
 
-    /// generate an admin token, which will be valid for 10 minutes from startup
-    #[arg(long, conflicts_with = "ignore_messages")]
-    generate_admin_token: bool,
+    /// Telegram username of the bot's owner
+    #[arg(short, long, value_parser = parse_owner_username)]
+    owner: Option<String>,
 
     /// increase verbosity
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -82,10 +81,23 @@ struct Args {
 fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
     let url = Url::parse(input).map_err(|e| e.to_string())?;
     let info = url.into_connection_info().map_err(
+        // the redis crate implements no other way to get to a human-friendly error description
         #[allow(deprecated)]
         |e| e.description().to_string(),
     )?;
     Ok(info)
+}
+
+fn parse_owner_username(mut input: &str) -> Result<String, String> {
+    if let Some(name) = input.strip_prefix('@') {
+        input = name;
+    }
+
+    if input.chars().all(|x| x.is_ascii_alphanumeric() || x == '_') {
+        Ok(input.into())
+    } else {
+        Err("Not a valid Telegram username".into())
+    }
 }
 
 fn init_logging(args: &Args) {
@@ -106,6 +118,38 @@ fn init_logging(args: &Args) {
         .init();
 }
 
+fn escape_html<'a, T: Into<Cow<'a, str>>>(input: T) -> Cow<'a, str> {
+    const SPECIAL_CHARS: [char; 5] = ['&', '<', '>', '"', '\''];
+    const REPLACE: [(char, &str); 5] = [
+        ('&', "&amp;"),
+        ('<', "&lt;"),
+        ('>', "&gt;"),
+        ('"', "&quot;"),
+        ('\'', "&#39;"),
+    ];
+
+    let input = input.into();
+
+    match input.find(SPECIAL_CHARS) {
+        Some(index) => {
+            let mut escaped = String::with_capacity(input.len() + 1);
+
+            escaped.push_str(&input[0..index]);
+
+            for c in input[index..].chars() {
+                if let Some(replace) = REPLACE.iter().find(|&(x, _)| *x == c).map(|(_, y)| y) {
+                    escaped.push_str(replace);
+                } else {
+                    escaped.push(c);
+                }
+            }
+
+            Cow::Owned(escaped)
+        }
+        None => input,
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
@@ -113,23 +157,29 @@ async fn main() -> ExitCode {
     init_logging(&args);
 
     let db_client = redis::Client::open(args.redis_url).unwrap();
-    let bot = teloxide::Bot::new(&args.bot_token).cache_me();
+    let bot = frankenstein::client_reqwest::Bot::new(&args.bot_token);
 
-    let admin_token = args.generate_admin_token.then(|| {
-        let token = AdminToken::new();
-        println!("Admin token (valid for 10 minutes): {token}");
-        token
-    });
+    macro_rules! pin_dyn {
+        ($x:expr) => {
+            pin!($x) as Pin<&mut dyn Future<Output = _>>
+        };
+    }
 
-    let dispatcher = if args.ignore_messages {
-        bot_commands::DispatcherTask::do_nothing()
+    let (bot_handle, bot_shutdown) = if args.ignore_messages {
+        let (tx, _) = oneshot::channel();
+
+        (pin_dyn!(async { Ok(()) }), tx)
     } else {
-        bot_commands::DispatcherTask::new(
+        let (tx, rx) = oneshot::channel();
+
+        let handle = tokio::spawn(bot::run(
             bot.clone(),
-            db_client.clone(),
-            args.allris_url.clone(),
-            admin_token,
-        )
+            DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
+            args.owner,
+            rx,
+        ));
+
+        (pin_dyn!(handle), tx)
     };
 
     let scraper = allris::scraper(
@@ -138,7 +188,7 @@ async fn main() -> ExitCode {
         db_client.clone(),
     );
 
-    tokio::spawn(scraper);
+    let scraper_handle = tokio::spawn(scraper);
 
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let mut broadcaster_handle = tokio::spawn(broadcast_task(bot, db_client, ctrl_rx));
@@ -147,22 +197,28 @@ async fn main() -> ExitCode {
         .await
         .expect("Unable to listen for shutdown signal");
 
-    log::info!("Shutting down ...");
-    let _ = dispatcher.shutdown().await;
+    log::info!("Shutting down broadcasting");
 
+    scraper_handle.abort();
     let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
 
-    tokio::select! {
-        _ = &mut broadcaster_handle => {
-            return ExitCode::SUCCESS;
-        },
-        _ = tokio::signal::ctrl_c() => (),
-        _ = tokio::time::sleep(Duration::from_secs(20)) => ()
+    let success = tokio::select! {
+        _ = &mut broadcaster_handle => true,
+        _ = tokio::signal::ctrl_c() => false,
+        _ = tokio::time::sleep(Duration::from_secs(20)) => false
     };
 
-    log::warn!("Not all pending messages have been sent, shutting down anyway ...");
-    let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Hard);
-    let _ = broadcaster_handle.await;
+    if !success {
+        log::warn!("Not all pending messages have been sent, shutting down anyway ...");
+        let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Hard);
+        let _ = broadcaster_handle.await;
+    }
+
+    // We want users to be able to stop broadcasts even if we're in the process of shutting down,
+    // so this comes last
+    log::info!("Shutting down bot");
+    let _ = bot_shutdown.send(());
+    let _ = bot_handle.await;
 
     ExitCode::SUCCESS
 }
