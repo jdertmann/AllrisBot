@@ -13,7 +13,9 @@ use super::{AllrisUrl, Error};
 use crate::allris::http_request;
 use crate::lru_cache::{Cache, Lru};
 
-static ORGANIZATIONS: LazyLock<Cache<Url, (DateTime<Utc>, Organization), Lru<Url>>> =
+type LruCache<K, V> = Cache<K, V, Lru<K>>;
+
+static ORGANIZATIONS: LazyLock<LruCache<Url, (DateTime<Utc>, Organization)>> =
     LazyLock::new(|| Cache::new(Lru::new(50)));
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
