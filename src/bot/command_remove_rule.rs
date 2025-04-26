@@ -1,11 +1,9 @@
-use std::fmt::Write;
-
 use serde::{Deserialize, Serialize};
+use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, concat};
 
 use super::keyboard::{Button, Choice, Choices};
 use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
 use crate::bot::keyboard::remove_keyboard;
-use crate::escape_html;
 use crate::types::Filter;
 
 pub const COMMAND: Command = Command {
@@ -84,24 +82,27 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let filters = cx.inner.database.get_filters(chat_id).await?;
 
     if filters.is_empty() {
-        let target = SelectedChannel::chat_selection_html_accusative(&dialogue.channel);
-        let text = format!("Zur Zeit sind keine Regeln für {target} aktiv!");
-        return respond_html!(cx, text, reply_markup = remove_keyboard()).await;
+        let target = SelectedChannel::chat_selection_accusative(&dialogue.channel);
+        let (text, entities) =
+            concat!("Zur Zeit sind keine Regeln für ", target, " aktiv!").to_message()?;
+        return respond!(cx, text, entities, reply_markup = remove_keyboard()).await;
     }
 
-    let mut text = format!(
-        "Aktuelle Auswahl: {}\n\n\
-        Wähle einen der folgenden Regeln zum Löschen aus:\n\n",
-        SelectedChannel::chat_selection_html(&dialogue.channel)
-    );
+    let mut message = MessageBuilder::new();
+
+    message.push("Aktuelle Auswahl: ")?;
+    message.push(SelectedChannel::chat_selection(&dialogue.channel))?;
+    message.push("\n\nWähle einen der folgenden Regeln zum Löschen aus:\n\n")?;
+
     for (i, f) in filters.iter().enumerate() {
-        let filter = escape_html(f.to_string());
-        writeln!(&mut text, "<b>Regel {}</b>\n{}", i + 1, filter).unwrap();
+        message.pushln(bold(concat!("Regel ", i + 1)))?;
+        message.pushln(f)?;
     }
 
+    let (text, entities) = message.build();
     let reply_markup = filters.iter().enumerate().keyboard_markup();
     let state = RemoveFilterSelection { filters };
 
     cx.update_dialogue(state, dialogue.channel).await?;
-    respond_html!(cx, text, reply_markup).await
+    respond!(cx, text, entities, reply_markup).await
 }

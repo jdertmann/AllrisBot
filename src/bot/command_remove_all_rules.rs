@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use telegram_message_builder::{WriteToMessage, concat};
 
 use super::keyboard::{Button, Choice, Choices};
 use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
@@ -86,23 +87,32 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let dialogue = cx.get_dialogue().await?;
     let chat_id = cx.selected_chat(&dialogue.channel).await?;
     let filters = cx.inner.database.get_filters(chat_id).await?;
-    let text;
 
-    {
-        let target = SelectedChannel::chat_selection_html_accusative(&dialogue.channel);
+    let (text, entities) = {
+        let target = SelectedChannel::chat_selection_accusative(&dialogue.channel);
 
         if filters.is_empty() {
-            let text = format!("Zur Zeit sind keine Regeln für {target} aktiv!");
-            return respond_html!(cx, text, reply_markup = remove_keyboard()).await;
+            let (text, entities) =
+                concat!("Zur Zeit sind keine Regeln für ", target, " aktiv!").to_message()?;
+            return respond!(cx, text, entities, reply_markup = remove_keyboard()).await;
         }
 
-        text = format!(
-            "🗑️ Du bist dabei, alle Regeln für {target} zu entfernen.\n\n\
-            Bist du sicher? Danach bekommst du erst mal keine Benachrichtigungen mehr."
-        );
-    }
+        concat!(
+            "🗑️ Du bist dabei, alle Regeln für ",
+            target,
+            " zu entfernen.\n\n",
+            "Bist du sicher? Danach bekommst du erst mal keine Benachrichtigungen mehr."
+        )
+        .to_message()?
+    };
 
     let state = ConfirmRemoveAllFilters(());
     cx.update_dialogue(state, dialogue.channel).await?;
-    respond_html!(cx, text, reply_markup = buttons().keyboard_markup()).await
+    respond!(
+        cx,
+        text,
+        entities,
+        reply_markup = buttons().keyboard_markup()
+    )
+    .await
 }

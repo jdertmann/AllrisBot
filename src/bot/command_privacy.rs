@@ -1,4 +1,4 @@
-use frankenstein::types::LinkPreviewOptions;
+use frankenstein::ParseMode;
 
 use super::{Command, HandleMessage, HandlerResult};
 
@@ -20,6 +20,5 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
         text += "\nBei Fragen kontaktiere mich direkt über Telegram: @";
         text += owner;
     }
-    let link_preview_options = LinkPreviewOptions::builder().is_disabled(true).build();
-    respond_html!(cx, text, link_preview_options).await
+    respond!(cx, text, parse_mode = ParseMode::Html).await
 }

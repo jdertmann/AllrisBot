@@ -43,6 +43,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "telegram-message-builder",
  "thiserror",
  "tokio",
  "tokio-retry",

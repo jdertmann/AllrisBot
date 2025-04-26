@@ -12,6 +12,7 @@ macro_rules! respond {
             .chat_id($this.chat_id())
             .maybe_message_thread_id($this.message.message_thread_id)
             .maybe_reply_parameters(reply_parameters)
+            .link_preview_options(::frankenstein::types::LinkPreviewOptions::builder().is_disabled(true).build())
             $(.$p(respond!(@param $p $($v)?)))*
             .build();
 
@@ -20,10 +21,4 @@ macro_rules! respond {
             crate::bot::HandlerResult::Ok(())
         }
     }};
-}
-
-macro_rules! respond_html {
-    ($this:expr $(,$p:ident $(= $v:expr)?)* $(,)?) => {
-        respond!($this, parse_mode = ::frankenstein::ParseMode::Html $(, $p $(= $v)?)*)
-    };
 }
