@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::GetUpdatesParams;
-use frankenstein::types::{AllowedUpdate, Message};
+use frankenstein::types::{AllowedUpdate, ChatMemberUpdated, Message};
 use frankenstein::updates::UpdateContent;
 use futures_util::FutureExt;
 use tokio::select;
@@ -16,6 +16,8 @@ const CLEANUP_PERIOD: Duration = Duration::from_secs(300);
 
 pub trait UpdateHandler: Clone + Send + 'static {
     fn handle_message(self, message: Message) -> impl Future<Output = ()> + Send;
+
+    fn handle_my_chat_member(self, update: ChatMemberUpdated) -> impl Future<Output = ()> + Send;
 }
 
 fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>>>) {
@@ -45,7 +47,7 @@ pub async fn handle_updates(
 
     let mut params = GetUpdatesParams::builder()
         .timeout(30)
-        .allowed_updates(vec![AllowedUpdate::Message])
+        .allowed_updates(vec![AllowedUpdate::Message, AllowedUpdate::MyChatMember])
         .build();
 
     loop {
@@ -60,8 +62,9 @@ pub async fn handle_updates(
                 for update in updates.result {
                     params.offset = Some(update.update_id as i64 + 1);
 
-                    let msg = match update.content {
-                        UpdateContent::Message(msg) => msg,
+                    let chat = match &update.content {
+                        UpdateContent::Message(msg) => &*msg.chat,
+                        UpdateContent::MyChatMember(member) => &member.chat,
                         _ => {
                             log::warn!("Received unexpected update: {:?}", update.content);
                             continue;
@@ -69,11 +72,11 @@ pub async fn handle_updates(
                     };
 
                     let mutex = mutexes
-                        .get(&msg.chat.id)
+                        .get(&chat.id)
                         .and_then(|weak| weak.upgrade())
                         .unwrap_or_else(|| {
                             let mutex = Default::default();
-                            mutexes.insert(msg.chat.id, Arc::downgrade(&mutex));
+                            mutexes.insert(chat.id, Arc::downgrade(&mutex));
                             mutex
                         });
 
@@ -91,7 +94,13 @@ pub async fn handle_updates(
                             acquiring.await
                         };
 
-                        handler.handle_message(msg).await;
+                        match update.content {
+                            UpdateContent::Message(msg) => handler.handle_message(msg).await,
+                            UpdateContent::MyChatMember(msg) => {
+                                handler.handle_my_chat_member(msg).await
+                            }
+                            _ => log::warn!("Unreachable code reached!"),
+                        }
                         drop(guard)
                     };
                     join_set.spawn(fut);

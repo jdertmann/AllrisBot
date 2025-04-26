@@ -20,7 +20,7 @@ use frankenstein::methods::{
     GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
     SetMyShortDescriptionParams,
 };
-use frankenstein::types::{BotCommand, BotCommandScope, Message};
+use frankenstein::types::{BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -492,6 +492,30 @@ impl UpdateHandler for Arc<MessageHandler> {
         }
         .handle()
         .await
+    }
+
+    async fn handle_my_chat_member(self, update: ChatMemberUpdated) {
+        let can_send_messages = match update.new_chat_member {
+            ChatMember::Administrator(member) => member.can_post_messages.unwrap_or(true),
+            ChatMember::Restricted(member) => member.can_send_messages,
+            ChatMember::Left(_) => false,
+            ChatMember::Kicked(_) => false,
+            _ => true,
+        };
+
+        if !can_send_messages {
+            let delete_chat = async {
+                self.database.remove_subscription(update.chat.id).await?;
+                self.database.remove_dialogue(update.chat.id).await?;
+                HandlerResult::Ok(())
+            };
+
+            if let Err(e) = delete_chat.await {
+                log::error!("Unable to delete chat {}: {e}", update.chat.id)
+            } else {
+                log::info!("Chat was deleted!");
+            }
+        }
     }
 }
 
