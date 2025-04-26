@@ -60,6 +60,7 @@ neue Vorlagen veröffentlicht werden – lege dazu <b>Regeln</b> fest, welche Vo
 🆘 <b>Sonstiges</b>
 {abbrechen}
 /{hilfe} oder /{start} – Zeige diese Hilfe an
+{datenschutz}
 
 📚 <b>Reguläre Ausdrücke (Regex)</b>  
 Beim Erstellen einer Regel kannst du festlegen, dass ein bestimmtes Merkmal ein sogenanntes Regex-Pattern erfüllen muss. \
@@ -74,10 +75,11 @@ Der Quellcode dieses Bots ist öffentlich zugänglich: {repo}\
     regeln = command_text!(command_rules),
     regel_loeschen = command_text!(command_remove_rule),
     alle_regeln_loeschen = command_text!(command_remove_all_rules),
-    abbrechen=command_text!(command_cancel),
+    abbrechen = command_text!(command_cancel),
+    datenschutz = command_text!(command_privacy),
     hilfe = super::command_help::COMMAND.name,
     start = super::command_start::COMMAND.name,
-    repo = env!("CARGO_PKG_REPOSITORY")
+    repo = env!("CARGO_PKG_REPOSITORY"),
 )
 }
 
