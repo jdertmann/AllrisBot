@@ -19,7 +19,7 @@ Clone the repository and build the project:
 
 ```bash
 git clone https://github.com/jdertmann/AllrisBot.git
-cd AllrisBot
+cd AllrisBot/allrisbot
 cargo build --release
 ```
 
