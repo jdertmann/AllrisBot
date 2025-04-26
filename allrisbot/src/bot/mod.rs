@@ -24,6 +24,7 @@ use frankenstein::methods::{
 use frankenstein::types::{BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use telegram_message_builder::{Error as MessageBuilderError, WriteToMessage, concat, text_link};
 use tokio::sync::oneshot;
 
 use self::command_new_rule::{PatternInput, TagSelection};
@@ -33,7 +34,6 @@ use self::command_target::ChannelSelection;
 use self::get_updates::UpdateHandler;
 use self::keyboard::remove_keyboard;
 use crate::database::{self, SharedDatabaseConnection};
-use crate::escape_html;
 
 const SHORT_DESCRIPTION: &str = "Dieser Bot benachrichtigt dich, wenn im Ratsinformationssystem der Stadt Bonn neue Vorlagen veröffentlicht werden.";
 
@@ -51,6 +51,8 @@ enum Error {
     Telegram(#[from] frankenstein::Error),
     #[error("Database error: {0}")]
     Database(#[from] database::Error),
+    #[error("Error generating message: {0}")]
+    MessageBuilder(#[from] MessageBuilderError),
 }
 
 type HandlerResult<T = ()> = Result<T, Error>;
@@ -113,6 +115,12 @@ struct Command {
     admin: bool,
 }
 
+impl Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "/{} – {}", self.name, self.description)
+    }
+}
+
 commands! {
     command_new_rule,
     command_rules,
@@ -156,73 +164,44 @@ impl SelectedChannel {
         (self.chat_id + 1_000_000_000_000).unsigned_abs()
     }
 
-    fn hyperlink_html(&self) -> impl Display {
-        struct Link<'a>(&'a SelectedChannel);
+    fn hyperlink(&self) -> impl WriteToMessage + '_ {
+        let link = if let Some(username) = &self.username {
+            format!("https://t.me/{username}")
+        } else {
+            format!("https://t.me/c/{}", self.channel_id())
+        };
 
-        impl Display for Link<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                // make sure that username only contains allowed chars,
-                // then we know it's already html escaped
-                let username = self
-                    .0
-                    .username
-                    .as_deref()
-                    .filter(|name| name.chars().all(|x| x.is_ascii_alphanumeric() || x == '_'));
-
-                write!(f, "<a href=\"")?;
-
-                if let Some(username) = username {
-                    write!(f, "https://t.me/{username}")?;
-                } else {
-                    write!(f, "https://t.me/c/{}", self.0.channel_id())?;
-                };
-
-                write!(f, "\">„")?;
-
-                if let Some(title) = &self.0.title {
-                    let title = escape_html(title);
-                    write!(f, "{title}")?;
-                } else if let Some(username) = username {
-                    write!(f, "@{username}")?;
-                } else {
-                    write!(f, "<unbekannt>")?;
-                };
-
-                write!(f, "“</a>")
+        let title = telegram_message_builder::from_fn(|builder| {
+            if let Some(title) = &self.title {
+                builder.push(title)
+            } else if let Some(username) = &self.username {
+                builder.push(concat!("@", username))
+            } else {
+                builder.push("<unbekannt>")
             }
-        }
+        });
 
-        Link(self)
+        text_link(link, concat!("„", title, "“"))
     }
 
-    fn chat_selection_html(channel: &Option<Self>) -> impl Display {
-        struct ChatSelection<'a>(&'a Option<SelectedChannel>);
-
-        impl Display for ChatSelection<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self.0 {
-                    Some(channel) => write!(f, "📢 {}", channel.hyperlink_html()),
-                    None => write!(f, "💬 Dieser Chat"),
-                }
+    fn chat_selection(channel: &Option<Self>) -> impl WriteToMessage {
+        telegram_message_builder::from_fn(move |builder| match channel {
+            Some(channel) => {
+                builder.push("📢 ")?;
+                builder.push(channel.hyperlink())
             }
-        }
-
-        ChatSelection(channel)
+            None => builder.push("💬 Dieser Chat"),
+        })
     }
 
-    fn chat_selection_html_accusative(channel: &Option<Self>) -> impl Display {
-        struct ChatSelection<'a>(&'a Option<SelectedChannel>);
-
-        impl Display for ChatSelection<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self.0 {
-                    Some(channel) => write!(f, "den Kanal {}", channel.hyperlink_html()),
-                    None => write!(f, "diesen Chat"),
-                }
+    fn chat_selection_accusative(channel: &Option<Self>) -> impl WriteToMessage {
+        telegram_message_builder::from_fn(move |builder| match channel {
+            Some(channel) => {
+                builder.push("den Kanal ")?;
+                builder.push(channel.hyperlink())
             }
-        }
-
-        ChatSelection(channel)
+            None => builder.push("diesen Chat"),
+        })
     }
 }
 

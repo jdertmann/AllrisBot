@@ -1,3 +1,4 @@
+use frankenstein::ParseMode;
 use frankenstein::types::LinkPreviewOptions;
 
 use super::{Command, HandleMessage, HandlerResult};
@@ -21,5 +22,5 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
         text += owner;
     }
     let link_preview_options = LinkPreviewOptions::builder().is_disabled(true).build();
-    respond_html!(cx, text, link_preview_options).await
+    respond!(cx, text, parse_mode = ParseMode::Html, link_preview_options).await
 }

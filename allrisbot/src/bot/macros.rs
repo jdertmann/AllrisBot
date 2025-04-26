@@ -21,9 +21,3 @@ macro_rules! respond {
         }
     }};
 }
-
-macro_rules! respond_html {
-    ($this:expr $(,$p:ident $(= $v:expr)?)* $(,)?) => {
-        respond!($this, parse_mode = ::frankenstein::ParseMode::Html $(, $p $(= $v)?)*)
-    };
-}

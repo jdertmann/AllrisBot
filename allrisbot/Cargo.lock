@@ -43,6 +43,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "telegram-message-builder",
  "thiserror",
  "tokio",
  "tokio-retry",
@@ -1862,6 +1863,23 @@ name = "synstructure"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8af7666ab7b6390ab78131fb5b0fce11d6b7a6951602017c35fa82800708971"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "telegram-message-builder"
+version = "0.1.0"
+dependencies = [
+ "frankenstein",
+ "telegram-message-builder-macro",
+]
+
+[[package]]
+name = "telegram-message-builder-macro"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",

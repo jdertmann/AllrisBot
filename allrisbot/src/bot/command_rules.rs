@@ -1,8 +1,7 @@
-use std::fmt::Write;
+use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, concat};
 
 use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
 use crate::bot::keyboard::remove_keyboard;
-use crate::escape_html;
 
 pub const COMMAND: Command = Command {
     name: "regeln",
@@ -19,18 +18,24 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let chat_id = cx.selected_chat(&dialogue.channel).await?;
     let filters = cx.inner.database.get_filters(chat_id).await?;
 
-    let target = SelectedChannel::chat_selection_html_accusative(&dialogue.channel);
+    let target = SelectedChannel::chat_selection_accusative(&dialogue.channel);
 
-    let text = if filters.is_empty() {
-        format!("Es sind keine Regeln für {target} aktiv.")
+    let (text, entities) = if filters.is_empty() {
+        concat!("Es sind keine Regeln für ", target, " aktiv.").to_message()?
     } else {
-        let mut text = format!("Zur Zeit sind die folgenden Regeln für {target} aktiv:\n\n");
+        let mut message = MessageBuilder::new();
+
+        message.push("Zur Zeit sind die folgenden Regeln für ")?;
+        message.push(target)?;
+        message.push(" aktiv:\n\n")?;
+
         for (i, f) in filters.iter().enumerate() {
-            let filter = escape_html(f.to_string());
-            writeln!(&mut text, "<b>Regel {}</b>\n{filter}", i + 1).unwrap();
+            message.pushln(bold(concat!("Regel ", i + 1)))?;
+            message.pushln(f)?;
         }
-        text
+
+        message.build()
     };
 
-    respond_html!(cx, text, reply_markup = remove_keyboard()).await
+    respond!(cx, text, entities, reply_markup = remove_keyboard()).await
 }

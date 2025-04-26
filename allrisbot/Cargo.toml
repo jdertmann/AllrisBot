@@ -25,3 +25,6 @@ tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "
 tokio-retry = "0.3"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 url = { version = "2.5", features = ["serde"] }
+
+[dependencies.telegram-message-builder]
+path = "../telegram-message-builder"

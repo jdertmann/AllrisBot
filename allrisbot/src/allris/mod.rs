@@ -11,6 +11,7 @@ use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarku
 use futures_util::{Stream, TryStreamExt};
 use oparl::{Consultation, Paper, get_organization};
 use reqwest::{Client, Response};
+use telegram_message_builder::{MessageBuilder, bold, italic, text_link};
 use thiserror::Error;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_retry::RetryIf;
@@ -19,7 +20,6 @@ use url::Url;
 
 use self::html::{WebsiteData, scrape_website};
 use crate::database::{self, DatabaseConnection};
-use crate::escape_html;
 use crate::types::{Message, Tag};
 
 #[derive(Debug, Error)]
@@ -165,54 +165,59 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         _ => None,
     };
 
-    let mut msg = String::new();
+    let r = (|| {
+        let mut msg = MessageBuilder::new();
 
-    msg += "<b>";
-    msg += &escape_html(title);
-    msg += "</b>\n";
+        msg.push(bold(title))?;
+        msg.push("\n")?;
 
-    if let Some(paper_type) = paper.paper_type.as_deref() {
-        msg += "\n📌 ";
-        msg += &escape_html(paper_type);
-    }
+        if let Some(paper_type) = paper.paper_type.as_deref() {
+            msg.push("\n📌 ")?;
+            msg.push(paper_type)?;
+        }
 
-    if let Some(verfasser) = verfasser {
-        msg += "\n👤 ";
-        msg += &escape_html(verfasser);
-    }
+        if let Some(verfasser) = verfasser {
+            msg.push("\n👤 ")?;
+            msg.push(verfasser)?;
+        }
+        if !gremien.is_empty() {
+            msg.push("\n🏛️ ")?;
+            for (i, gremium) in gremien.iter().enumerate() {
+                if i > 0 {
+                    msg.push(" | ")?;
+                }
 
-    if !gremien.is_empty() {
-        msg += "\n🏛️ ";
-        for (i, gremium) in gremien.iter().enumerate() {
-            if i > 0 {
-                msg += " | ";
-            }
+                let text = telegram_message_builder::from_fn(|builder| {
+                    if gremium.2 {
+                        builder.push(italic(&gremium.0))
+                    } else {
+                        builder.push(&gremium.0)
+                    }
+                });
 
-            let gr = if let Some(url) = &gremium.1 {
-                format!(
-                    "<a href=\"{}\">{}</a>",
-                    escape_html(url.as_str()),
-                    escape_html(&gremium.0),
-                )
-                .into()
-            } else {
-                escape_html(&gremium.0)
-            };
-
-            if gremium.2 {
-                msg += "<b>";
-                msg += &gr;
-                msg += "</b>";
-            } else {
-                msg += &gr;
+                if let Some(url) = &gremium.1 {
+                    msg.push(text_link(url, text))?;
+                } else {
+                    msg.push(text)?;
+                };
             }
         }
-    }
 
-    if let Some(dsnr) = dsnr {
-        msg += "\n📎 Ds.-Nr. ";
-        msg += &escape_html(dsnr);
-    }
+        if let Some(dsnr) = dsnr {
+            msg.push("\n📎 Ds.-Nr. ")?;
+            msg.push(dsnr)?;
+        }
+
+        Ok(msg.build())
+    })();
+
+    let (text, entities) = match r {
+        Ok(t) => t,
+        Err(telegram_message_builder::Error::MessageTooLong) => {
+            log::warn!("Notification message for “{title}” would be too long, skipping!");
+            return None;
+        }
+    };
 
     let create_button = |text: &str, url: &Url| {
         InlineKeyboardButton::builder()
@@ -233,7 +238,8 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         .build();
     let request = SendMessageParams::builder()
         .chat_id(0)
-        .text(msg)
+        .text(text)
+        .entities(entities)
         .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard))
         .build();
 

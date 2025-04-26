@@ -15,7 +15,6 @@ mod database;
 mod lru_cache;
 mod types;
 
-use std::borrow::Cow;
 use std::error::Error;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -125,38 +124,6 @@ fn init_logging(args: &Args) {
         .filter_module("selectors", log::LevelFilter::Off)
         .filter_module("html5ever", log::LevelFilter::Off)
         .init();
-}
-
-fn escape_html<'a, T: Into<Cow<'a, str>>>(input: T) -> Cow<'a, str> {
-    const SPECIAL_CHARS: [char; 5] = ['&', '<', '>', '"', '\''];
-    const REPLACE: [(char, &str); 5] = [
-        ('&', "&amp;"),
-        ('<', "&lt;"),
-        ('>', "&gt;"),
-        ('"', "&quot;"),
-        ('\'', "&#39;"),
-    ];
-
-    let input = input.into();
-
-    match input.find(SPECIAL_CHARS) {
-        Some(index) => {
-            let mut escaped = String::with_capacity(input.len() + 1);
-
-            escaped.push_str(&input[0..index]);
-
-            for c in input[index..].chars() {
-                if let Some(replace) = REPLACE.iter().find(|&(x, _)| *x == c).map(|(_, y)| y) {
-                    escaped.push_str(replace);
-                } else {
-                    escaped.push(c);
-                }
-            }
-
-            Cow::Owned(escaped)
-        }
-        None => input,
-    }
 }
 
 #[tokio::main]
