@@ -4,6 +4,7 @@ mod macros;
 mod command_cancel;
 mod command_help;
 mod command_new_rule;
+mod command_privacy;
 mod command_remove_all_rules;
 mod command_remove_rule;
 mod command_rules;
@@ -55,7 +56,7 @@ enum Error {
 type HandlerResult<T = ()> = Result<T, Error>;
 
 macro_rules! commands {
-    ($($cmd:ident),*) => {
+    ($($cmd:ident),* $(,)?) => {
         async fn handle_command(cx: HandleMessage<'_>, cmd: &str, param: Option<&str>) -> HandlerResult {
             let cmd = cmd.to_ascii_lowercase();
             match cmd.as_str() {
@@ -122,7 +123,8 @@ commands! {
 
     command_cancel,
     command_help,
-    command_start
+    command_start,
+    command_privacy,
 }
 
 states! {
