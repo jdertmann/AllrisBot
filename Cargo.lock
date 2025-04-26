@@ -1869,6 +1869,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "telegram-message-builder"
+version = "0.1.0"
+dependencies = [
+ "frankenstein",
+ "telegram-message-builder-macro",
+]
+
+[[package]]
+name = "telegram-message-builder-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "tendril"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

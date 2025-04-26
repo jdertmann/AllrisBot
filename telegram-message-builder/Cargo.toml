@@ -1,0 +1,10 @@
+[package]
+name = "telegram-message-builder"
+description = "Utility for constructing Telegram messages with rich text entities."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+frankenstein = "0.40.0"
+telegram-message-builder-macro = { path = "../telegram-message-builder-macro" }

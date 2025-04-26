@@ -1,3 +1,9 @@
+[workspace]
+members = [
+    "telegram-message-builder",
+    "telegram-message-builder-macro",
+]
+
 [package]
 name = "allrisbot"
 description = "Telegram bot that notifies users about newly published documents in the Allris 4 council information system"

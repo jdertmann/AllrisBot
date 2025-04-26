@@ -31,7 +31,7 @@ See `./target/release/allrisbot --help` for usage details.
 
 If you’d like to make contributions, feel free to open an issue or pull request.
 
-## License
+## License (`allrisbot` crate)
 
 Copyright (C) 2025 Johannes Dertmann
 
