@@ -1,4 +1,4 @@
-use super::Command;
+use super::{Command, HandleMessage, HandlerResult, command_help, command_privacy};
 
 pub const COMMAND: Command = Command {
     name: "start",
@@ -10,4 +10,10 @@ pub const COMMAND: Command = Command {
     admin: true,
 };
 
-pub use super::command_help::handle_command;
+pub async fn handle_command(cx: HandleMessage<'_>, param: Option<&str>) -> HandlerResult {
+    if param == Some(command_privacy::COMMAND.name) {
+        command_privacy::handle_command(cx, None).await
+    } else {
+        command_help::handle_command(cx, param).await
+    }
+}
