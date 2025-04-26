@@ -60,7 +60,12 @@ impl ConfirmRemoveAllFilters {
                     "❌ Die Regeln konnten leider nicht gelöscht werden. Bitte versuche es erneut."
                 };
 
-                cx.reset_dialogue(channel).await?;
+                if channel.is_none() {
+                    cx.remove_dialogue().await?;
+                } else {
+                    cx.reset_dialogue(channel).await?;
+                }
+
                 respond!(cx, text, reply_markup = remove_keyboard()).await
             }
             _ => {
