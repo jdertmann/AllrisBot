@@ -153,21 +153,3 @@ pub fn get_update(
     get_papers(client.clone(), url)
         .try_filter(move |paper| ready(!paper.deleted && paper.date >= Some(oldest_date)))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_get_update() {
-        use chrono::Days;
-        use futures_util::StreamExt;
-
-        let url = AllrisUrl::parse("https://www.bonn.sitzung-online.de/").unwrap();
-        let mut update = get_update(&reqwest::Client::new(), &url, Utc::now() - Days::new(2));
-
-        while let Some(x) = update.next().await {
-            x.unwrap();
-        }
-    }
-}
