@@ -1,5 +1,6 @@
 use frankenstein::types::{ChatAdministratorRights, KeyboardButtonRequestChat};
 use serde::{Deserialize, Serialize};
+use telegram_message_builder::{WriteToMessage, concat};
 
 use super::keyboard::{Button, Choice, Choices, remove_keyboard};
 use super::{Command, Error, HandleMessage, HandlerResult, SelectedChannel};
@@ -115,16 +116,20 @@ impl ChannelSelection {
         cx: HandleMessage<'_>,
         channel: SelectedChannel,
     ) -> HandlerResult {
-        let text = format!(
-            "✅ Der Kanal {} wurde ausgewählt!\n\n\
-             Du kannst nun die Einstellungen für diesen Channel ändern. \
-             Führe /{} erneut aus, um die Auswahl zu ändern oder zurückzusetzen.",
-            channel.hyperlink_html(),
-            COMMAND.name
-        );
+        let (text, entities) = concat!(
+            "✅ Der Kanal ",
+            channel.hyperlink(),
+            " wurde ausgewählt!\n\n",
+            "Du kannst nun die Einstellungen für diesen Channel ändern. ",
+            format_args!(
+                "Führe /{} erneut aus, um die Auswahl zu ändern oder zurückzusetzen.",
+                COMMAND.name
+            )
+        )
+        .to_message()?;
 
         cx.reset_dialogue(Some(channel)).await?;
-        respond_html!(cx, text, reply_markup = remove_keyboard()).await
+        respond!(cx, text, entities, reply_markup = remove_keyboard()).await
     }
 
     async fn handle_reset(&self, cx: HandleMessage<'_>) -> HandlerResult {
@@ -152,17 +157,19 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let state = ChannelSelection::new(request_id, current_channel.is_some());
     let reply_markup = state.buttons.keyboard_markup();
 
-    let text = if let Some(channel) = current_channel {
-        &format!(
-            "Aktuelle Auswahl: 📢 {}\n\n\
-             Du kannst zu diesem privaten Chat zurückwechseln oder einen anderen Kanal wählen:",
-            channel.hyperlink_html()
+    let (text, entities) = if let Some(channel) = current_channel {
+        concat!(
+            "Aktuelle Auswahl: ",
+            channel.hyperlink(),
+            "\n\nDu kannst zu diesem privaten Chat zurückwechseln oder einen anderen Kanal wählen:",
         )
+        .to_message()?
     } else {
         "Aktuelle Auswahl: 💬 Dieser Chat\n\n\
          Du kannst stattdessen auch einen Kanal auswählen:"
+            .to_message()?
     };
 
     cx.update_dialogue(state, dialogue.channel).await?;
-    respond_html!(cx, text, reply_markup).await
+    respond!(cx, text, entities, reply_markup).await
 }

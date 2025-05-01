@@ -1,16 +1,14 @@
-use std::borrow::Cow;
 use std::convert::identity;
-use std::fmt::Write;
 use std::iter;
 
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, code, concat, pre};
 
 use super::keyboard::{force_reply, remove_keyboard};
 use super::{Command, Error, SelectedChannel};
 use crate::bot::keyboard::{Button, Choice, Choices};
 use crate::bot::{HandleMessage, HandlerResult};
-use crate::escape_html;
 use crate::types::{Condition, Filter, Tag};
 
 pub const COMMAND: Command = Command {
@@ -59,17 +57,20 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let dialogue = cx.get_dialogue().await?;
 
     let reply_markup = buttons().keyboard_markup();
-    let text = format!(
-        "🎛️ <b>Regel erstellen</b>\n\n\
-         Wähle ein Merkmal für die erste Bedingung oder tippe auf „Speichern“, \
-         um die Regel sofort ohne Bedingungen (alle Vorlagen werden erfasst) anzulegen.\n\n\
-         Ausgewählter Chat: {}",
-        SelectedChannel::chat_selection_html(&dialogue.channel)
-    );
+    let (text, entities) = concat!(
+        "🎛️ ",
+        bold("Regel erstellen"),
+        "\n\n\
+        Wähle ein Merkmal für die erste Bedingung oder tippe auf „Speichern“, \
+        um die Regel sofort ohne Bedingungen (alle Vorlagen werden erfasst) anzulegen.\n\n\
+        Ausgewählter Chat: ",
+        SelectedChannel::chat_selection(&dialogue.channel)
+    )
+    .to_message()?;
 
     cx.update_dialogue(TagSelection::default(), dialogue.channel)
         .await?;
-    respond_html!(cx, text, reply_markup).await
+    respond!(cx, text, entities, reply_markup).await
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,49 +97,62 @@ impl TagSelection {
                     })
                     .await?;
 
-                let text = format!(
-                    "✅ Die Regel für {} wurde gespeichert und ist nun aktiv!",
-                    SelectedChannel::chat_selection_html_accusative(&channel)
-                );
+                let (text, entities) = concat!(
+                    "✅ Die Regel für ",
+                    SelectedChannel::chat_selection_accusative(&channel),
+                    " wurde gespeichert und ist nun aktiv!"
+                )
+                .to_message()?;
 
                 cx.reset_dialogue(channel).await?;
 
-                respond_html!(cx, text, reply_markup = remove_keyboard()).await
+                respond!(cx, text, entities, reply_markup = remove_keyboard()).await
             }
             Some(TagButton::Select(tag)) => {
                 let state = PatternInput {
-                    previous_conditions: self.previous_conditions.clone(),
+                    previous_conditions: self.previous_conditions,
                     tag,
                 };
 
-                cx.update_dialogue(state, channel).await?;
+                let mut msg = MessageBuilder::new();
 
-                let mut text = format!("Du hast das Merkmal <b>{}</b>", tag.label());
+                msg.push("Du hast das Merkmal ")?;
+                msg.push(bold(tag.label()))?;
                 if let Some(desc) = tag.description() {
-                    write!(&mut text, " ({desc})").unwrap();
+                    msg.push(format_args!(" ({desc})"))?;
                 }
-                text.push_str(" gewählt.");
+                msg.push(" gewählt.")?;
 
                 if !tag.examples().is_empty() {
-                    let joined = tag
-                        .examples()
-                        .iter()
-                        .map(|s| format!("<code>{}</code>", s))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    text.push_str(&format!(
-                        "\n\nMögliche Werte sind beispielsweise: {}",
-                        joined
-                    ));
+                    msg.push("\n\nMögliche Werte sind beispielsweise: ")?;
+                    for (i, example) in tag.examples().iter().enumerate() {
+                        if i != 0 {
+                            msg.push(", ")?;
+                        }
+                        msg.push(code(example))?;
+                    }
                 }
 
-                text.push_str(
-                    "\n\nGib nun ein Regex-Pattern ein, wie z. B. <code>Wert</code> \
-                     oder <code>Option 1|Option 2</code>. Um die Bedingung \
+                msg.push("\n\nGib nun ein Regex-Pattern ein, wie z. B. ")?;
+                msg.push(code("Wert"))?;
+                msg.push(" oder ")?;
+                msg.push(code("Option 1|Option 2"))?;
+                msg.push(
+                    ". Um die Bedingung \
                      umzudrehen, beginne mit einem Ausrufezeichen – dann werden \
                      alle Vorlagen, auf die das Pattern zutrifft, ausgeschlossen.",
-                );
-                respond_html!(cx, text, reply_markup = force_reply("Regex-Pattern")).await
+                )?;
+
+                let (text, entities) = msg.build();
+
+                cx.update_dialogue(state, channel).await?;
+                respond!(
+                    cx,
+                    text,
+                    entities,
+                    reply_markup = force_reply("Regex-Pattern")
+                )
+                .await
             }
             None => {
                 let text = format!(
@@ -173,16 +187,19 @@ impl PatternInput {
             None => (false, text.as_str()),
         };
 
-        let regex_check: Result<_, Cow<'static, str>> = if raw_pattern.contains('\n') {
-            let text = "❌ Ungültiges Regex-Pattern: Zeilenumbrüche sind nicht erlaubt. Bitte versuche es erneut.";
-            Err(text.into())
+        let regex_check = if raw_pattern.contains('\n') {
+            let text = "❌ Ungültiges Regex-Pattern: Zeilenumbrüche sind nicht erlaubt. Bitte versuche es erneut.".to_message()?;
+            Err(text)
         } else if let Err(e) = RegexBuilder::new(raw_pattern).size_limit(10000).build() {
             let text = match e {
-                regex::Error::CompiledTooBig(_) => "❌ Ungültiges Regex-Pattern: Das Pattern ist zu groß. Bitte versuche es erneut.".into(),
+                regex::Error::CompiledTooBig(_) => {
+                    "❌ Ungültiges Regex-Pattern: Das Pattern ist zu groß. Bitte versuche es erneut.".to_message()?
+                }
                 e => {
-                    format!(
-                    "❌ Ungültiges Regex-Pattern. Bitte versuche es erneut. Tipp: Frage ChatGPT um Hilfe.\n\n<pre>{}</pre>",
-                    escape_html(e.to_string())).into()
+                    concat!(
+                        "❌ Ungültiges Regex-Pattern. Bitte versuche es erneut. Tipp: Frage ChatGPT um Hilfe.\n\n",
+                        pre(e)
+                    ).to_message()?
                 }
             };
             Err(text)
@@ -190,8 +207,14 @@ impl PatternInput {
             Ok(())
         };
 
-        if let Err(text) = regex_check {
-            respond_html!(cx, text, reply_markup = force_reply("Regex-Pattern")).await?;
+        if let Err((text, entities)) = regex_check {
+            respond!(
+                cx,
+                text,
+                entities,
+                reply_markup = force_reply("Regex-Pattern")
+            )
+            .await?;
             return Ok(());
         }
 
@@ -203,17 +226,18 @@ impl PatternInput {
         });
 
         let summary = Filter { conditions };
-        let text = format!(
-            "Bedingung hinzugefügt – aktuelle Regel:\n\n{}\n\
+        let text = format_args!(
+            "Bedingung hinzugefügt – aktuelle Regel:\n\n{summary}\n\
             Wähle ein weiteres Merkmal oder tippe auf „Speichern“.",
-            escape_html(summary.to_string())
-        );
+        )
+        .to_message()?
+        .0;
 
         let state = TagSelection {
             previous_conditions: summary.conditions,
         };
 
         cx.update_dialogue(state, channel).await?;
-        respond_html!(cx, text, reply_markup = buttons().keyboard_markup()).await
+        respond!(cx, text, reply_markup = buttons().keyboard_markup()).await
     }
 }

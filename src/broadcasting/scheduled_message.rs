@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use frankenstein::response::{ErrorResponse, ResponseParameters};
 use frankenstein::types::LinkPreviewOptions;
-use frankenstein::{AsyncTelegramApi, Error as RequestError, ParseMode};
+use frankenstein::{AsyncTelegramApi, Error as RequestError};
 use regex::Regex;
 use tokio::time::sleep;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
@@ -222,7 +222,6 @@ impl ScheduledMessage {
         let message = self.message();
 
         let mut params = message.request.clone();
-        params.parse_mode = Some(ParseMode::Html);
         params.chat_id = self.chat_id.into();
         params.link_preview_options = Some(LinkPreviewOptions::builder().is_disabled(true).build());
 
