@@ -88,18 +88,18 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
         return respond!(cx, text, entities, reply_markup = remove_keyboard()).await;
     }
 
-    let mut message = MessageBuilder::new();
+    let mut msg = MessageBuilder::new();
 
-    message.push("Aktuelle Auswahl: ")?;
-    message.push(SelectedChannel::chat_selection(&dialogue.channel))?;
-    message.push("\n\nWähle einen der folgenden Regeln zum Löschen aus:\n\n")?;
+    msg.write("Aktuelle Auswahl: ")?;
+    msg.write(SelectedChannel::chat_selection(&dialogue.channel))?;
+    msg.write("\n\nWähle einen der folgenden Regeln zum Löschen aus:\n\n")?;
 
     for (i, f) in filters.iter().enumerate() {
-        message.pushln(bold(concat!("Regel ", i + 1)))?;
-        message.pushln(f)?;
+        msg.writeln(bold(concat!("Regel ", i + 1)))?;
+        msg.writeln(f)?;
     }
 
-    let (text, entities) = message.build();
+    let (text, entities) = msg.build();
     let reply_markup = filters.iter().enumerate().keyboard_markup();
     let state = RemoveFilterSelection { filters };
 

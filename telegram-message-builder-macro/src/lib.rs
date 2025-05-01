@@ -43,7 +43,7 @@ pub fn __concat_helper(input: TokenStream) -> TokenStream {
     quote! {
         ({
             #[allow(clippy::too_many_arguments)]
-            fn concat(#(#fn_args),*) -> impl #crate_path::WriteToMessage {
+            const fn concat(#(#fn_args),*) -> impl #crate_path::WriteToMessage {
                 #crate_path::from_fn(move |builder| {
                     #(#fn_body)*
                     Ok(())

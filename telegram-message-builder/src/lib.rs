@@ -98,7 +98,7 @@ impl MessageBuilder {
     /// Sets a custom character limit for the message.
     ///
     /// This function allows you to specify a custom message length limit for the current `MessageBuilder`.
-    /// If something is pushed that would cause the message to exceed this limit, the push operation will
+    /// If something is written that would cause the message to exceed this limit, the write operation will
     /// return [`Error::MessageTooLong`].
     ///
     /// Panics if the provided `limit` exceeds the global [`CHAR_LIMIT`].
@@ -123,7 +123,7 @@ impl MessageBuilder {
     ///
     ///     let mut truncated = false;
     ///     for item in long_list {
-    ///         if msg.pushln(item).is_err() {
+    ///         if msg.writeln(item).is_err() {
     ///             truncated = true;
     ///             break;
     ///         }
@@ -132,7 +132,7 @@ impl MessageBuilder {
     ///     // Restore full limit and add truncation marker, if necessary
     ///     msg.set_char_limit(CHAR_LIMIT);
     ///     if truncated {
-    ///         msg.push(truncation_marker).unwrap();
+    ///         msg.write(truncation_marker).unwrap();
     ///     }
     ///     Ok(())
     /// });
@@ -158,18 +158,18 @@ impl MessageBuilder {
     }
 
     /// Appends a [`WriteToMessage`] item.
-    pub fn push(&mut self, s: impl WriteToMessage) -> Result<(), Error> {
+    pub fn write(&mut self, s: impl WriteToMessage) -> Result<(), Error> {
         s.write_to(self)
     }
 
     /// Appends a [`WriteToMessage`] item followed by a newline (`\n`).
-    pub fn pushln(&mut self, s: impl WriteToMessage) -> Result<(), Error> {
-        self.push(s)?;
-        self.push_str("\n")
+    pub fn writeln(&mut self, s: impl WriteToMessage) -> Result<(), Error> {
+        self.write(s)?;
+        self.write_str("\n")
     }
 
     /// Appends a [`Display`] item.
-    fn push_display(&mut self, d: &impl Display) -> Result<(), Error> {
+    pub fn write_fmt(&mut self, d: impl Display) -> Result<(), Error> {
         let current_len = self.buf.len();
         write!(&mut self.buf, "{d}").expect("writing to String never fails");
 
@@ -177,7 +177,7 @@ impl MessageBuilder {
         let char_count = added.chars().count();
 
         if self.len_chars + char_count > self.char_limit {
-            self.buf.drain(current_len..);
+            self.buf.truncate(current_len);
             return Err(Error::MessageTooLong);
         }
 
@@ -188,7 +188,7 @@ impl MessageBuilder {
     }
 
     /// Appends a plain string.
-    pub fn push_str(&mut self, s: &str) -> Result<(), Error> {
+    pub fn write_str(&mut self, s: &str) -> Result<(), Error> {
         let char_count = s.chars().count();
 
         if self.len_chars + char_count > self.char_limit {
@@ -245,7 +245,7 @@ impl WriteToMessage for &dyn WriteToMessage {
 
 impl<T: Display> WriteToMessage for T {
     fn write_to(&self, message: &mut MessageBuilder) -> Result<(), Error> {
-        message.push_display(self)
+        write!(message, "{self}")
     }
 
     fn to_message(&self) -> Result<(String, Vec<MessageEntity>), Error> {
@@ -460,9 +460,9 @@ pub const fn pre_with_language<T: WriteToMessage, S: AsRef<str>>(
 ///         }
 ///
 ///         if important {
-///             msg.pushln(bold(item))?;
+///             msg.writeln(bold(item))?;
 ///         } else {
-///             msg.pushln(item)?;
+///             msg.writeln(item)?;
 ///         }
 ///     }
 ///     Ok(())
@@ -519,6 +519,9 @@ macro_rules! concat {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+    use std::hint::black_box;
+
     use super::{concat, *};
 
     fn get_entity(entities: &Vec<MessageEntity>) -> &MessageEntity {
@@ -528,7 +531,7 @@ mod tests {
     #[test]
     fn test_simple_push() {
         let mut builder = MessageBuilder::new();
-        builder.push_str("Hello, world!").unwrap();
+        builder.write_str("Hello, world!").unwrap();
         assert_eq!(builder.as_str(), "Hello, world!");
     }
 
@@ -581,8 +584,8 @@ mod tests {
     #[test]
     fn test_utf16_length() {
         let mut builder = MessageBuilder::new();
-        builder.push_str("abc😀").unwrap();
-        builder.push_str("💡").unwrap();
+        builder.write_str("abc😀").unwrap();
+        builder.write_str("💡").unwrap();
 
         assert_eq!(builder.len_utf16, 7);
         assert_eq!(builder.len_chars, 5);
@@ -591,12 +594,12 @@ mod tests {
     #[test]
     fn test_message_length_limit() {
         let long_str = "a".repeat(CHAR_LIMIT + 1);
-        let result = MessageBuilder::new().push_str(&long_str);
+        let result = MessageBuilder::new().write_str(&long_str);
         assert!(matches!(result, Err(Error::MessageTooLong)));
 
         let long_str = "😀".repeat(CHAR_LIMIT);
         MessageBuilder::new()
-            .push_str(&long_str)
+            .write_str(&long_str)
             .expect("CHAR_LIMIT characters are ok");
     }
 
@@ -657,24 +660,24 @@ mod tests {
         msg.set_char_limit(10);
         assert_eq!(msg.get_char_limit(), 10);
 
-        assert!(msg.push_str("12345").is_ok());
-        assert!(msg.push(67).is_ok());
+        assert!(msg.write_str("12345").is_ok());
+        assert!(msg.write_fmt(67).is_ok());
         assert_eq!(msg.as_str(), "1234567");
 
         let mut msg = MessageBuilder::new();
         assert_eq!(msg.get_char_limit(), CHAR_LIMIT);
 
         msg.set_char_limit(6);
-        assert!(msg.push_str("abc").is_ok());
-        assert!(msg.push_display(&"123").is_ok());
-        assert!(msg.push_str("!").is_err());
+        assert!(msg.write_str("abc").is_ok());
+        assert!(write!(msg, "123").is_ok());
+        assert!(msg.write_str("!").is_err());
         assert_eq!(msg.as_str(), "abc123");
 
         let mut msg = MessageBuilder::try_from(String::new()).unwrap();
         assert_eq!(msg.get_char_limit(), CHAR_LIMIT);
 
         msg.set_char_limit(4);
-        assert!(msg.push_str("hello").is_err());
+        assert!(msg.write_str("hello").is_err());
         assert_eq!(msg.as_str(), "");
     }
 
@@ -696,18 +699,32 @@ mod tests {
         let mut msg = MessageBuilder::default();
         msg.set_char_limit(30);
 
-        msg.push(initial_text).unwrap();
+        msg.write(initial_text).unwrap();
 
         let old_msg = msg.clone();
 
         let from_fn_example = from_fn(move |message| {
-            message.push(bold(next_text))?;
-            message.push(overflow_text)
+            message.write(bold(next_text))?;
+            message.write(overflow_text)
         });
 
         let result = from_fn_example.write_to(&mut msg);
 
         assert!(result.is_err());
         assert_eq!(old_msg, msg);
+    }
+
+    #[test]
+    fn test_error_on_write_fmt() {
+        let mut msg = MessageBuilder::try_from(String::from("Test")).unwrap();
+        msg.buf.shrink_to_fit();
+        msg.set_char_limit(50);
+        let old_msg = msg.clone();
+        let old_capacity = msg.buf.capacity();
+
+        write!(msg, "{:?}", black_box::<&dyn Debug>(&[i32::MAX; 10])).unwrap_err();
+
+        assert_eq!(msg, old_msg);
+        assert!(msg.buf.capacity() > old_capacity);
     }
 }

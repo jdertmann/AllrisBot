@@ -23,18 +23,18 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let (text, entities) = if filters.is_empty() {
         concat!("Es sind keine Regeln für ", target, " aktiv.").to_message()?
     } else {
-        let mut message = MessageBuilder::new();
+        let mut msg = MessageBuilder::new();
 
-        message.push("Zur Zeit sind die folgenden Regeln für ")?;
-        message.push(target)?;
-        message.push(" aktiv:\n\n")?;
+        msg.write("Zur Zeit sind die folgenden Regeln für ")?;
+        msg.write(target)?;
+        msg.write(" aktiv:\n\n")?;
 
         for (i, f) in filters.iter().enumerate() {
-            message.pushln(bold(concat!("Regel ", i + 1)))?;
-            message.pushln(f)?;
+            msg.writeln(bold(concat!("Regel ", i + 1)))?;
+            msg.writeln(f)?;
         }
 
-        message.build()
+        msg.build()
     };
 
     respond!(cx, text, entities, reply_markup = remove_keyboard()).await

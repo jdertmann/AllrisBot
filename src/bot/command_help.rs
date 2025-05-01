@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use frankenstein::types::MessageEntity;
-use telegram_message_builder::{MessageBuilder, bold, concat, italic, text_link};
+use telegram_message_builder::{WriteToMessage, bold, concat, from_fn, italic, text_link};
 
 use super::{Command, HandleMessage, HandlerResult, command_privacy};
 use crate::bot::{
@@ -22,75 +22,118 @@ pub const COMMAND: Command = Command {
 static MESSAGE_PRIVATE: OnceLock<(String, Vec<MessageEntity>)> = OnceLock::new();
 static MESSAGE_GROUP: OnceLock<(String, Vec<MessageEntity>)> = OnceLock::new();
 
-fn message(
-    group: bool,
-    owner: Option<&str>,
-) -> Result<(String, Vec<MessageEntity>), telegram_message_builder::Error> {
-    let mut msg = MessageBuilder::new();
-
-    msg.pushln(concat!(
+const fn intro_paragraph() -> impl WriteToMessage {
+    concat!(
         bold("🤖 Allris-Bot"),
         "\nDieser Bot benachrichtigt dich, wenn im ",
-        text_link("https://www.bonn.sitzung-online.de", "Ratsinformationssystem der Stadt Bonn"),
+        text_link(
+            "https://www.bonn.sitzung-online.de",
+            "Ratsinformationssystem der Stadt Bonn"
+        ),
         " neue Vorlagen veröffentlicht werden – lege dazu ",
         bold("Regeln"),
-        " fest, welche Vorlagen du erhalten willst.\n\n",
+        " fest, welche Vorlagen du erhalten willst.\n"
+    )
+}
 
-        bold("🔧 Regeln verwalten\n"),
-        italic("Du erhältst Benachrichtungen für alle Vorlagen, auf die mindestens eine Regel zutrifft.\n"),
+const fn rules_paragraph() -> impl WriteToMessage {
+    let desc =
+        "Du erhältst Benachrichtungen für alle Vorlagen, auf die mindestens eine Regel zutrifft.";
+    concat!(
+        bold("🔧 Regeln verwalten"),
+        "\n",
+        italic(desc),
+        "\n",
         command_new_rule::COMMAND,
         command_rules::COMMAND,
         command_remove_rule::COMMAND,
         command_remove_all_rules::COMMAND,
-    ))?;
+    )
+}
 
-    if !group {
-        msg.pushln(concat!(
-            bold("📬 Ziel einstellen\n"),
-            italic(
-                "Der Bot kann Benachrichtigungen hier im Chat oder in einem deiner Kanäle senden.\n"
-            ),
-            command_target::COMMAND,
-        ))?;
-    }
+const fn target_paragraph() -> impl WriteToMessage {
+    let desc = "Der Bot kann Benachrichtigungen hier im Chat oder in einem deiner Kanäle senden.";
+    concat!(
+        bold("📬 Ziel einstellen"),
+        "\n",
+        italic(desc),
+        "\n",
+        command_target::COMMAND,
+    )
+}
 
-    msg.push(concat!(
-        bold("🆘 Sonstiges\n"),
-        command_cancel::COMMAND,
-        format_args!(
-            "/{hilfe} oder /{start} – Zeige diese Hilfe an\n",
+fn miscellaneous_paragraph() -> impl WriteToMessage {
+    from_fn(|msg| {
+        msg.writeln(bold("🆘 Sonstiges"))?;
+
+        write!(
+            msg,
+            "{cancel}\
+             /{hilfe} oder /{start} – Zeige diese Hilfe an\n\
+             {privacy}",
+            cancel = command_cancel::COMMAND,
             hilfe = command_help::COMMAND.name,
             start = command_start::COMMAND.name,
-        ),
-        command_privacy::COMMAND,
-        "\n",
+            privacy = command_privacy::COMMAND,
+        )
+    })
+}
 
+fn regex_paragraph() -> impl WriteToMessage {
+    concat!(
         bold("📚 Reguläre Ausdrücke (Regex)"),
-        "\nBeim Erstellen einer Regel kannst du festlegen, dass ein bestimmtes Merkmal ein sogenanntes Regex-Pattern erfüllen muss. ",
-        "Gib dort einfach den Text ein, nach dem du filtern möchtest – das funktioniert in den meisten Fällen zuverlässig. ",
-        "Falls du komplexere Muster brauchst, helfen dir ",
+        "\nBeim Erstellen einer Regel kannst du festlegen, dass ein bestimmtes Merkmal ein sogenanntes Regex-Pattern erfüllen muss. \
+         Gib dort einfach den Text ein, nach dem du filtern möchtest – das funktioniert in den meisten Fällen zuverlässig. \
+         Falls du komplexere Muster brauchst, helfen dir ",
         text_link("https://regex101.com", "regex101.com"),
-        " oder ChatGPT beim Ausprobieren und Erlernen von regulären Ausdrücken.\n\n",
+        " oder ChatGPT beim Ausprobieren und Erlernen von regulären Ausdrücken.\n"
+    )
+}
 
-        bold("👨‍💻 Mehr Infos & Kontakt"),
-        "\nDer Quellcode dieses Bots ist öffentlich zugänglich: ",
-        env!("CARGO_PKG_REPOSITORY"),
-    ))?;
+fn about_paragraph(owner: Option<&str>) -> impl WriteToMessage {
+    from_fn(move |msg| {
+        msg.writeln(bold("👨‍💻 Mehr Infos & Kontakt"))?;
 
-    if let Some(owner) = owner {
-        msg.push("\n\nFragen, Feedback oder Ideen? Schreib mir gern: @")?;
-        msg.push(owner)?;
-    }
+        write!(
+            msg,
+            "Der Quellcode dieses Bots ist öffentlich zugänglich: {}",
+            env!("CARGO_PKG_REPOSITORY"),
+        )?;
 
-    Ok(msg.build())
+        if let Some(owner) = owner {
+            write!(
+                msg,
+                "\n\nFragen, Feedback oder Ideen? Schreib mir gern: @{owner}"
+            )?;
+        }
+
+        Ok(())
+    })
+}
+
+fn message(group: bool, owner: Option<&str>) -> (String, Vec<MessageEntity>) {
+    from_fn(|msg| {
+        msg.writeln(intro_paragraph())?;
+        msg.writeln(rules_paragraph())?;
+
+        if !group {
+            msg.writeln(target_paragraph())?;
+        }
+
+        msg.writeln(miscellaneous_paragraph())?;
+        msg.writeln(regex_paragraph())?;
+        msg.write(about_paragraph(owner))
+    })
+    .to_message()
+    .expect("help message too long!")
 }
 
 pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerResult {
     let owner = cx.inner.owner.as_deref();
     let (text, entities) = if cx.chat_id() < 0 {
-        MESSAGE_GROUP.get_or_init(|| message(true, owner).expect("help message too long!"))
+        MESSAGE_GROUP.get_or_init(|| message(true, owner))
     } else {
-        MESSAGE_PRIVATE.get_or_init(|| message(false, owner).expect("help message too long!"))
+        MESSAGE_PRIVATE.get_or_init(|| message(false, owner))
     };
     respond!(cx, text, entities = entities.clone()).await
 }

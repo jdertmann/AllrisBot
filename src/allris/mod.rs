@@ -11,7 +11,7 @@ use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarku
 use futures_util::{Stream, TryStreamExt};
 use oparl::{Consultation, Paper, get_organization};
 use reqwest::{Client, Response};
-use telegram_message_builder::{MessageBuilder, bold, italic, text_link};
+use telegram_message_builder::{WriteToMessage, bold, from_fn, italic, text_link};
 use thiserror::Error;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_retry::RetryIf;
@@ -165,54 +165,50 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         _ => None,
     };
 
-    let r = (|| {
-        let mut msg = MessageBuilder::new();
-
-        msg.push(bold(title))?;
-        msg.push("\n")?;
+    let message = from_fn(|msg| {
+        msg.writeln(bold(title))?;
 
         if let Some(paper_type) = paper.paper_type.as_deref() {
-            msg.push("\n📌 ")?;
-            msg.push(paper_type)?;
+            write!(msg, "\n📌 {paper_type}")?;
         }
 
         if let Some(verfasser) = verfasser {
-            msg.push("\n👤 ")?;
-            msg.push(verfasser)?;
+            write!(msg, "\n👤 {verfasser}")?;
         }
+
         if !gremien.is_empty() {
-            msg.push("\n🏛️ ")?;
-            for (i, gremium) in gremien.iter().enumerate() {
+            write!(msg, "\n🏛️ ")?;
+            for (i, (name, link, authoritative)) in gremien.iter().enumerate() {
                 if i > 0 {
-                    msg.push(" | ")?;
+                    msg.write(" | ")?;
                 }
 
-                let text = telegram_message_builder::from_fn(|builder| {
-                    if gremium.2 {
-                        builder.push(italic(&gremium.0))
+                let with_link = from_fn(|msg| {
+                    if let Some(link) = link {
+                        msg.write(text_link(link, name))
                     } else {
-                        builder.push(&gremium.0)
+                        msg.write(name)
                     }
                 });
 
-                if let Some(url) = &gremium.1 {
-                    msg.push(text_link(url, text))?;
+                if *authoritative {
+                    msg.write(italic(with_link))?;
                 } else {
-                    msg.push(text)?;
-                };
+                    msg.write(with_link)?;
+                }
             }
         }
 
         if let Some(dsnr) = dsnr {
-            msg.push("\n📎 Ds.-Nr. ")?;
-            msg.push(dsnr)?;
+            write!(msg, "\n📎 Ds.-Nr. {dsnr}")?;
         }
 
-        Ok(msg.build())
-    })();
+        Ok(())
+    })
+    .to_message();
 
-    let (text, entities) = match r {
-        Ok(t) => t,
+    let (text, entities) = match message {
+        Ok(m) => m,
         Err(telegram_message_builder::Error::MessageTooLong) => {
             log::warn!("Notification message for \"{title}\" would be too long, skipping!");
             return None;
