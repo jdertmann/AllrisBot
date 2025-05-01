@@ -46,7 +46,8 @@ impl Display for Error {
 impl std::error::Error for Error {}
 
 /// Builder for constructing Telegram messages with formatting
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct MessageBuilder {
     buf: String,
     entities: Vec<MessageEntity>,
@@ -437,7 +438,8 @@ pub const fn pre_with_language<T: WriteToMessage, S: AsRef<str>>(
 
 /// Converts a closure into a [`WriteToMessage`] implementation.
 ///
-/// Useful for ad hoc formatting or builder-based generation.
+/// Useful for ad hoc formatting or builder-based generation. Note that if the closure returns
+/// an error, the [`MessageBuilder`] will be reset to its previous state.
 ///
 /// # Example
 ///
@@ -478,7 +480,24 @@ pub const fn from_fn<F: Fn(&mut MessageBuilder) -> Result<(), Error>>(f: F) -> i
 
     impl<F: Fn(&mut MessageBuilder) -> Result<(), Error>> WriteToMessage for FromFn<F> {
         fn write_to(&self, message: &mut MessageBuilder) -> Result<(), Error> {
-            self.0(message)
+            let old_len = message.buf.len();
+            let old_len_entities = message.entities.len();
+            let old_len_chars = message.len_chars;
+            let old_len_utf16 = message.len_utf16;
+            let old_limit = message.char_limit;
+
+            let result = self.0(message);
+
+            if result.is_err() {
+                // reset everything to the original state
+                message.buf.truncate(old_len);
+                message.entities.truncate(old_len_entities);
+                message.len_chars = old_len_chars;
+                message.len_utf16 = old_len_utf16;
+                message.char_limit = old_limit;
+            }
+
+            result
         }
     }
 
@@ -664,5 +683,31 @@ mod tests {
     fn test_char_limit_too_high() {
         let mut msg = MessageBuilder::default();
         msg.set_char_limit(CHAR_LIMIT + 1);
+    }
+
+    #[test]
+    fn test_reset_message_builder() {
+        use crate::{MessageBuilder, WriteToMessage, from_fn};
+
+        let initial_text = "👋 Hello, world!";
+        let next_text = "Lorem ipsum ✅";
+        let overflow_text = "This is a long message that will exceed the limit!";
+
+        let mut msg = MessageBuilder::default();
+        msg.set_char_limit(30);
+
+        msg.push(initial_text).unwrap();
+
+        let old_msg = msg.clone();
+
+        let from_fn_example = from_fn(move |message| {
+            message.push(bold(next_text))?;
+            message.push(overflow_text)
+        });
+
+        let result = from_fn_example.write_to(&mut msg);
+
+        assert!(result.is_err());
+        assert_eq!(old_msg, msg);
     }
 }
