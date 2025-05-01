@@ -46,12 +46,13 @@ impl Display for Error {
 impl std::error::Error for Error {}
 
 /// Builder for constructing Telegram messages with formatting
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct MessageBuilder {
     buf: String,
     entities: Vec<MessageEntity>,
     len_chars: usize,
     len_utf16: usize,
+    char_limit: usize,
 }
 
 impl TryFrom<String> for MessageBuilder {
@@ -70,7 +71,14 @@ impl TryFrom<String> for MessageBuilder {
             entities: vec![],
             len_chars,
             len_utf16,
+            char_limit: CHAR_LIMIT,
         })
+    }
+}
+
+impl Default for MessageBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -82,7 +90,65 @@ impl MessageBuilder {
             entities: Vec::new(),
             len_chars: 0,
             len_utf16: 0,
+            char_limit: CHAR_LIMIT,
         }
+    }
+
+    /// Sets a custom character limit for the message.
+    ///
+    /// This function allows you to specify a custom message length limit for the current `MessageBuilder`.
+    /// If something is pushed that would cause the message to exceed this limit, the push operation will
+    /// return [`Error::MessageTooLong`].
+    ///
+    /// Panics if the provided `limit` exceeds the global [`CHAR_LIMIT`].
+    ///
+    /// # Example
+    ///
+    /// This example demonstrates using `set_char_limit` with [`from_fn`] to generate a message from a list.
+    /// The message will be truncated gracefully if it would exceed the limit:
+    ///
+    /// ```
+    /// use telegram_message_builder::{
+    ///     CHAR_LIMIT, Error, MessageBuilder,
+    ///     WriteToMessage, bold, from_fn
+    /// };
+    ///
+    /// let truncation_marker = "[...]";
+    /// let long_list = &["item"; 5000];
+    ///
+    /// let list = from_fn(|msg| {
+    ///     // Reserve space for the truncation marker
+    ///     msg.set_char_limit(CHAR_LIMIT - truncation_marker.len());
+    ///
+    ///     let mut truncated = false;
+    ///     for item in long_list {
+    ///         if msg.pushln(item).is_err() {
+    ///             truncated = true;
+    ///             break;
+    ///         }
+    ///     }
+    ///
+    ///     // Restore full limit and add truncation marker, if necessary
+    ///     msg.set_char_limit(CHAR_LIMIT);
+    ///     if truncated {
+    ///         msg.push(truncation_marker).unwrap();
+    ///     }
+    ///     Ok(())
+    /// });
+    ///
+    /// let (text, entities) = list.to_message().unwrap();
+    ///
+    /// assert!(text.len() <= CHAR_LIMIT);
+    /// assert!(text.ends_with(truncation_marker));
+    /// ```
+    pub fn set_char_limit(&mut self, limit: usize) {
+        assert!(limit <= CHAR_LIMIT);
+        self.char_limit = limit;
+    }
+
+    /// Returns the current message character limit.
+    pub fn get_char_limit(&mut self) -> usize {
+        self.char_limit
     }
 
     /// Returns the number of unicode characters in the message.
@@ -109,7 +175,7 @@ impl MessageBuilder {
         let added = &self.buf[current_len..];
         let char_count = added.chars().count();
 
-        if self.len_chars + char_count > CHAR_LIMIT {
+        if self.len_chars + char_count > self.char_limit {
             self.buf.drain(current_len..);
             return Err(Error::MessageTooLong);
         }
@@ -124,7 +190,7 @@ impl MessageBuilder {
     pub fn push_str(&mut self, s: &str) -> Result<(), Error> {
         let char_count = s.chars().count();
 
-        if self.len_chars + char_count > CHAR_LIMIT {
+        if self.len_chars + char_count > self.char_limit {
             return Err(Error::MessageTooLong);
         }
 
@@ -560,5 +626,43 @@ mod tests {
         assert_eq!(underline_entity.length as usize, underline_len);
         assert_eq!(italic_entity.offset as usize, italic_start);
         assert_eq!(italic_entity.length as usize, italic_len);
+    }
+
+    #[test]
+    fn test_custom_char_limit() {
+        use crate::{CHAR_LIMIT, MessageBuilder};
+
+        let mut msg = MessageBuilder::default();
+
+        assert_eq!(msg.get_char_limit(), CHAR_LIMIT);
+        msg.set_char_limit(10);
+        assert_eq!(msg.get_char_limit(), 10);
+
+        assert!(msg.push_str("12345").is_ok());
+        assert!(msg.push(67).is_ok());
+        assert_eq!(msg.as_str(), "1234567");
+
+        let mut msg = MessageBuilder::new();
+        assert_eq!(msg.get_char_limit(), CHAR_LIMIT);
+
+        msg.set_char_limit(6);
+        assert!(msg.push_str("abc").is_ok());
+        assert!(msg.push_display(&"123").is_ok());
+        assert!(msg.push_str("!").is_err());
+        assert_eq!(msg.as_str(), "abc123");
+
+        let mut msg = MessageBuilder::try_from(String::new()).unwrap();
+        assert_eq!(msg.get_char_limit(), CHAR_LIMIT);
+
+        msg.set_char_limit(4);
+        assert!(msg.push_str("hello").is_err());
+        assert_eq!(msg.as_str(), "");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_char_limit_too_high() {
+        let mut msg = MessageBuilder::default();
+        msg.set_char_limit(CHAR_LIMIT + 1);
     }
 }
