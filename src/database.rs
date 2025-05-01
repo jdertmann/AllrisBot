@@ -389,7 +389,7 @@ implement_with_retry! {
         connection,
         volfdnr: &str,
         message: &Message
-    ) -> Option<String> {
+    ) -> Option<StreamId> {
         let serialized = serde_json::to_string(message)?;
 
         script!("schedule_broadcast.lua")

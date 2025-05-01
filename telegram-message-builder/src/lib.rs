@@ -311,7 +311,7 @@ entity_fns! {
     expandable_blockquote: ExpandableBlockquote;
 }
 
-pub const fn custom_emoji<S: Display, T: AsRef<str>>(
+pub const fn custom_emoji<S: AsRef<str>, T: Display>(
     emoji_id: S,
     alt_emoji: T,
 ) -> WithEntity<T, S> {
@@ -475,6 +475,23 @@ mod tests {
         // 😀 and 💡 = 2 UTF-16 units each
         assert_eq!(builder.len_utf16, 7);
         assert_eq!(builder.len_chars(), 5); // 3 normal + 2 emoji
+    }
+
+    #[test]
+    fn test_custom_emoji() {
+        fn _impl_write_to_message<S: AsRef<str>, T: Display>(x: S, y: T) -> impl WriteToMessage {
+            custom_emoji(x, y)
+        }
+
+        let (text, entities) = concat!(
+            custom_emoji("emoji_id", '🍊'),
+            custom_emoji("emoji_id", "👨‍💻")
+        )
+        .to_message()
+        .unwrap();
+
+        assert_eq!(entities.len(), 2);
+        assert_eq!(&text, "🍊👨‍💻");
     }
 
     #[test]
