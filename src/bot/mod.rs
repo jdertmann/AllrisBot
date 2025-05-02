@@ -171,13 +171,13 @@ impl SelectedChannel {
             format!("https://t.me/c/{}", self.channel_id())
         };
 
-        let title = telegram_message_builder::from_fn(|builder| {
+        let title = telegram_message_builder::from_fn(|msg| {
             if let Some(title) = &self.title {
-                builder.push(title)
+                msg.write(title)
             } else if let Some(username) = &self.username {
-                builder.push(concat!("@", username))
+                msg.write(concat!("@", username))
             } else {
-                builder.push("<unbekannt>")
+                msg.write("<unbekannt>")
             }
         });
 
@@ -185,22 +185,22 @@ impl SelectedChannel {
     }
 
     fn chat_selection(channel: &Option<Self>) -> impl WriteToMessage {
-        telegram_message_builder::from_fn(move |builder| match channel {
+        telegram_message_builder::from_fn(move |msg| match channel {
             Some(channel) => {
-                builder.push("📢 ")?;
-                builder.push(channel.hyperlink())
+                msg.write("📢 ")?;
+                msg.write(channel.hyperlink())
             }
-            None => builder.push("💬 Dieser Chat"),
+            None => msg.write("💬 Dieser Chat"),
         })
     }
 
     fn chat_selection_accusative(channel: &Option<Self>) -> impl WriteToMessage {
-        telegram_message_builder::from_fn(move |builder| match channel {
+        telegram_message_builder::from_fn(move |msg| match channel {
             Some(channel) => {
-                builder.push("den Kanal ")?;
-                builder.push(channel.hyperlink())
+                msg.write("den Kanal ")?;
+                msg.write(channel.hyperlink())
             }
-            None => builder.push("diesen Chat"),
+            None => msg.write("diesen Chat"),
         })
     }
 }

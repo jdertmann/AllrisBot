@@ -116,32 +116,32 @@ impl TagSelection {
 
                 let mut msg = MessageBuilder::new();
 
-                msg.push("Du hast das Merkmal ")?;
-                msg.push(bold(tag.label()))?;
+                msg.write("Du hast das Merkmal ")?;
+                msg.write(bold(tag.label()))?;
                 if let Some(desc) = tag.description() {
-                    msg.push(format_args!(" ({desc})"))?;
+                    write!(msg, " ({desc})")?;
                 }
-                msg.push(" gewählt.")?;
+                msg.write(" gewählt.")?;
 
                 if !tag.examples().is_empty() {
-                    msg.push("\n\nMögliche Werte sind beispielsweise: ")?;
+                    msg.write("\n\nMögliche Werte sind beispielsweise: ")?;
                     for (i, example) in tag.examples().iter().enumerate() {
                         if i != 0 {
-                            msg.push(", ")?;
+                            msg.write(", ")?;
                         }
-                        msg.push(code(example))?;
+                        msg.write(code(example))?;
                     }
                 }
 
-                msg.push("\n\nGib nun ein Regex-Pattern ein, wie z. B. ")?;
-                msg.push(code("Wert"))?;
-                msg.push(" oder ")?;
-                msg.push(code("Option 1|Option 2"))?;
-                msg.push(
+                msg.write(concat!(
+                    "\n\nGib nun ein Regex-Pattern ein, wie z. B. ",
+                    code("Wert"),
+                    " oder ",
+                    code("Option 1|Option 2"),
                     ". Um die Bedingung \
                      umzudrehen, beginne mit einem Ausrufezeichen – dann werden \
                      alle Vorlagen, auf die das Pattern zutrifft, ausgeschlossen.",
-                )?;
+                ))?;
 
                 let (text, entities) = msg.build();
 

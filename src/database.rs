@@ -166,7 +166,7 @@ impl DatabaseConnection {
     ///
     /// Returns `Ok` if/once the request should be retried, or an Error that should
     /// be propagated to the caller
-    async fn handle_error(&mut self, err: Error, deadline: Option<Instant>) -> Result<()> {
+    async fn handle_error(&mut self, err: Error, deadline: Deadline) -> Result<()> {
         let err = match err {
             Error::Redis(err) => err,
             e => return Err(e),
@@ -195,7 +195,7 @@ impl DatabaseConnection {
         let retry_at = Instant::now()
             + Duration::from_millis(duration_ms).mul_f64(0.75 + rand::random::<f64>() / 2.);
 
-        if deadline.is_some_and(|t| t < retry_at) {
+        if deadline.0.is_some_and(|t| t < retry_at) {
             return Err(err.into());
         }
 
@@ -217,152 +217,130 @@ pub struct SharedDatabaseConnection {
     timeout: Option<Duration>,
 }
 
-async fn timeout_at<T>(
-    deadline: Option<Instant>,
-    future: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    if let Some(deadline) = deadline {
-        tokio::time::timeout_at(deadline, future)
-            .await
-            .map_err(|_| Error::Timeout)?
-    } else {
-        future.await
+#[derive(Debug, Clone, Copy)]
+struct Deadline(Option<Instant>);
+
+impl Deadline {
+    fn new(timeout: Option<Duration>) -> Self {
+        Self(timeout.map(|timeout| Instant::now() + timeout))
+    }
+
+    async fn run<T>(self, fut: impl Future<Output = Result<T>>) -> Result<T> {
+        if let Some(deadline) = self.0 {
+            tokio::time::timeout_at(deadline, fut)
+                .await
+                .map_err(|_| Error::Timeout)?
+        } else {
+            fut.await
+        }
     }
 }
 
 macro_rules! implement_with_retry {
     (
-        $conn_struct:ident,
-        $conn_struct_shared:ident;
+        $conn_struct:ident
+        $(, $conn_struct_shared:ident)?;
         $(
-            $(#[$attr:ident])*
-            $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
+            $(#[$attr:meta])?
+            $vis:vis async fn $fn_name:ident $(< $t:ident $( : $bound:path )? >)?
             (
-                $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
+                $conn_var:ident $(, $param_name:ident : $param_type:ty)* $(,)?
             ) $(-> $return_type:ty)?
             $body:block
         )+
     ) => {
-
-        mod common {
-            use super::*;
-
-            $(
-                pub(super) async fn $fn_name $( <$t $(: $bound)?>)? (conn: &mut $conn_struct, deadline: Option<Instant>, $($param_name: $param_type),*) -> Result<Option<implement_with_retry!(@ret $($return_type)?)>> {
-                    let request = async {
-                        let $conn = conn.get_connection().await?;
-                        Ok($body)
-                    };
-
-                    match timeout_at(deadline, request).await {
-                        Ok(r) => {
-                            conn.retry_counter = 0;
-                            return Ok(Some(r));
-                        }
-                        Err(e) => {
-                            implement_with_retry!(@reset $($attr)*, conn);
-                            conn.handle_error(e, deadline).await?
-                        }
-                    }
-
-                    Ok(None)
-                }
-            )+
-        }
-
+        // === impl for exclusive connection ===
         impl $conn_struct {
-        $(
-            #[allow(dead_code)]
-            $vis async fn $fn_name $(< $t $(: $bound)?>)?  (
-                &mut self,
-                $($param_name: $param_type),*
-            ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
-                let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
-
-                loop {
-                    if let Some(r) = common::$fn_name(self, deadline, $($param_name),*).await? {
-                        return Ok(r)
-                    }
-                }
-            }
-        )+
-        }
-        impl $conn_struct_shared {
             $(
                 #[allow(dead_code)]
-                $vis async fn $fn_name $(< $t $(: $bound)? >)?  (
-                    &self,
+                $vis async fn $fn_name $(< $t $( : $bound )? >)? (
+                    &mut self,
                     $($param_name: $param_type),*
-                ) -> Result<implement_with_retry!(@ret $($return_type)?)>  {
-                    let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
+                ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
+                    let deadline = Deadline::new(self.timeout);
 
                     loop {
-                        let mut conn = timeout_at(deadline, async { Ok(self.connection.lock().await) }).await?;
-
-                        for _ in 0..4 {
-                            if let Some(r) = common::$fn_name(&mut conn, deadline, $($param_name),*).await? {
-                                return Ok(r)
-                            }
+                        let $conn_var = &mut *self;
+                        let result = implement_with_retry!(@attempt $conn_var, $body, deadline, $($attr)?).await?;
+                        if let Some(result) = result {
+                            return Ok(result);
                         }
-
-                        // reacquire mutex after 4 failed attempts, in case the failure is the request's fault
                     }
                 }
             )+
         }
-    };
-    (
-        $conn_struct:ident;
-        $(
-            $(#[$attr:ident])*
-            $vis:vis async fn $fn_name:ident $(<$t:ident $(: $bound:path)?>)?
-            (
-                $conn:ident $(, $param_name:ident : $param_type:ty)* $(,)?
-            ) $(-> $return_type:ty)?
-            $body:block
-        )+
-    ) => {
-        impl $conn_struct {
-        $(
-            #[allow(dead_code)]
-            $vis async fn $fn_name $(< $t $(: $bound)?>)?  (
-                &mut self,
-                $($param_name: $param_type),*
-            ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
-                let deadline = self.timeout.map(|timeout| Instant::now() + timeout);
 
-                loop {
-                    let request = async {
-                        let request = async {
-                            let $conn = self.get_connection().await?;
-                            Ok($body)
-                        };
+        // === optional impl for shared connection ===
+        implement_with_retry! {
+            @maybe_shared_impl
+            $($conn_struct_shared)? {
+                $(
+                    #[allow(dead_code)]
+                    $vis async fn $fn_name $(< $t $( : $bound )? >)? (
+                        &self,
+                        $($param_name: $param_type),*
+                    ) -> Result<implement_with_retry!(@ret $($return_type)?)> {
+                        let deadline = Deadline::new(self.timeout);
 
-                        match timeout_at(deadline, request).await {
-                            Ok(r) => {
-                                self.retry_counter = 0;
-                                return Ok::<_, Error>(Some(r));
+                        loop {
+                            let mut $conn_var = deadline.run(async {
+                                Ok(self.connection.lock().await)
+                            }).await?;
+
+                            for _ in 0..4 {
+                                let result = implement_with_retry!(@attempt $conn_var, $body, deadline, $($attr)?).await?;
+                                if let Some(result) = result {
+                                    return Ok(result);
+                                }
                             }
-                            Err(e) => {
-                                implement_with_retry!(@reset $($attr)*, conn);
-                                self.handle_error(e, deadline).await?
-                            }
+
+                            // Reacquire mutex after 4 failed attempts in case it's the request's fault.
                         }
-
-                        Ok(None)
-                    };
-
-                    if let Some(r) = request.await? {
-                        return Ok(r)
                     }
-                }
+                )+
             }
-        )+
         }
     };
-    (@reset reset_connection_on_error, $conn:expr) => { $conn.connection = None; };
-    (@reset $($x:ident)?, $conn:expr ) => { };
-    (@ret $t:ty) =>  { $t };
+
+    // === Core retryable operation ===
+    (@attempt $conn_var:ident, $body:block, $deadline:expr, $($attr:meta)?) => { async {
+        let __request = async {
+            let $conn_var = $conn_var.get_connection().await?;
+            Ok($body)
+        };
+
+        match $deadline.run(__request).await {
+            Ok(__result) => {
+                $conn_var.retry_counter = 0;
+                return Ok::<_, Error>(Some(__result));
+            }
+            Err(__err) => {
+                implement_with_retry!(@handle_reset $($attr)?, $conn_var);
+                $conn_var.handle_error(__err, $deadline).await?
+            }
+        }
+
+        Ok(None)
+    }};
+
+    // === Conditionally implement shared struct ===
+    (@maybe_shared_impl $shared_struct:ident { $($impl_tokens:tt)* }) => {
+        impl $shared_struct {
+            $($impl_tokens)*
+        }
+    };
+    (@maybe_shared_impl { $($impl_tokens:tt)* }) => {};
+
+    // === Attribute dispatcher for reset behavior ===
+    (@handle_reset reset_connection_on_error, $conn_var:expr) => {
+        $conn_var.connection = None;
+    };
+    (@handle_reset $($other:meta)?, $conn_var:expr) => {
+        // No-op if no reset attribute is present
+    };
+
+    // === Return type resolver ===
+    (@ret $t:ty) => { $t };
     (@ret) => { () };
 }
 
@@ -389,7 +367,7 @@ implement_with_retry! {
         connection,
         volfdnr: &str,
         message: &Message
-    ) -> Option<String> {
+    ) -> Option<StreamId> {
         let serialized = serde_json::to_string(message)?;
 
         script!("schedule_broadcast.lua")

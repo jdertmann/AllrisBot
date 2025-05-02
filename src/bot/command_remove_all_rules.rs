@@ -25,16 +25,15 @@ impl<'a> Choice<'a> for ConfirmChoice {
     type Action = bool;
 
     fn button(&self) -> Button<'a, Self> {
-        if self.0 {
-            Button::Text {
-                text: "⚠️ Ja, alles löschen!".into(),
-                action: |x| x.0,
-            }
+        let text = if self.0 {
+            "⚠️ Ja, alles löschen!"
         } else {
-            Button::Text {
-                text: "Abbrechen".into(),
-                action: |x| x.0,
-            }
+            "Abbrechen"
+        };
+
+        Button::Text {
+            text: text.into(),
+            action: |x| x.0,
         }
     }
 }

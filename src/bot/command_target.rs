@@ -99,16 +99,11 @@ impl ChannelSelection {
 
     async fn handle_unexpected_text(&self, cx: HandleMessage<'_>) -> HandlerResult {
         let text = format!(
-            "️Bitte verwende die Schaltflächen, um einen Chat auszuwählen, oder sende /{} zum Abbrechen",
+            "️Bitte verwende die Schaltflächen, um einen Chat auszuwählen, oder sende /{} zum Abbrechen.",
             super::command_cancel::COMMAND.name
         );
 
-        respond!(
-            cx,
-            text = text,
-            reply_markup = self.buttons.keyboard_markup()
-        )
-        .await
+        respond!(cx, text, reply_markup = self.buttons.keyboard_markup()).await
     }
 
     async fn handle_chat_shared(
@@ -119,12 +114,9 @@ impl ChannelSelection {
         let (text, entities) = concat!(
             "✅ Der Kanal ",
             channel.hyperlink(),
-            " wurde ausgewählt!\n\n",
-            "Du kannst nun die Einstellungen für diesen Channel ändern. ",
-            format_args!(
-                "Führe /{} erneut aus, um die Auswahl zu ändern oder zurückzusetzen.",
-                COMMAND.name
-            )
+            " wurde ausgewählt!\n\nDu kannst nun die Einstellungen für diesen Channel ändern. Führe /",
+            COMMAND.name,
+            " erneut aus, um die Auswahl zu ändern oder zurückzusetzen."
         )
         .to_message()?;
 
@@ -134,7 +126,6 @@ impl ChannelSelection {
 
     async fn handle_reset(&self, cx: HandleMessage<'_>) -> HandlerResult {
         let text = "✅ Du kannst nun wieder Einstellungen für diesen privaten Chat vornehmen.";
-
         cx.reset_dialogue(None).await?;
         respond!(cx, text, reply_markup = remove_keyboard()).await
     }
@@ -157,18 +148,18 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     let state = ChannelSelection::new(request_id, current_channel.is_some());
     let reply_markup = state.buttons.keyboard_markup();
 
-    let (text, entities) = if let Some(channel) = current_channel {
-        concat!(
-            "Aktuelle Auswahl: ",
-            channel.hyperlink(),
-            "\n\nDu kannst zu diesem privaten Chat zurückwechseln oder einen anderen Kanal wählen:",
-        )
-        .to_message()?
+    let sentence = if current_channel.is_some() {
+        "\n\nDu kannst zu diesem privaten Chat zurückwechseln oder einen anderen Kanal wählen:"
     } else {
-        "Aktuelle Auswahl: 💬 Dieser Chat\n\n\
-         Du kannst stattdessen auch einen Kanal auswählen:"
-            .to_message()?
+        "\n\nDu kannst stattdessen auch einen Kanal auswählen:"
     };
+
+    let (text, entities) = concat!(
+        "Aktuelle Auswahl: ",
+        SelectedChannel::chat_selection(current_channel),
+        sentence
+    )
+    .to_message()?;
 
     cx.update_dialogue(state, dialogue.channel).await?;
     respond!(cx, text, entities, reply_markup).await
