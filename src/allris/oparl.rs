@@ -11,14 +11,12 @@ use url::Url;
 
 use super::{AllrisUrl, Error};
 use crate::allris::http_request;
-use crate::lru_cache::{Cache, Lru};
-
-type LruCache<K, V> = Cache<K, V, Lru<K>>;
+use crate::lru_cache::{Lru, LruCache};
 
 /// Caches calls to the api's `organization` endpoints, as these information will
 /// rarely change.
 static ORGANIZATIONS: LazyLock<LruCache<Url, (DateTime<Utc>, Organization)>> =
-    LazyLock::new(|| Cache::new(Lru::new(50)));
+    LazyLock::new(|| LruCache::new(Lru::new(50)));
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

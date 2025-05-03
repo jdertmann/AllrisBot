@@ -115,6 +115,7 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> CacheInner<K, V, E> {
     }
 }
 
+#[derive(Debug)]
 pub struct CacheItem<V>(Arc<OnceCell<V>>);
 
 impl<V> Deref for CacheItem<V> {
@@ -187,6 +188,10 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
         }
     }
 }
+
+
+
+pub type LruCache<K, V> = Cache<K, V, Lru<K>>;
 
 #[cfg(test)]
 mod tests {
