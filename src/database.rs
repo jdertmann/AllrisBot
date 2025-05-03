@@ -147,6 +147,7 @@ impl DatabaseConnection {
 
     pub fn shared(self) -> SharedDatabaseConnection {
         SharedDatabaseConnection {
+            client: self.client.clone(),
             timeout: self.timeout,
             connection: Mutex::new(self),
         }
@@ -215,6 +216,13 @@ impl DatabaseConnection {
 pub struct SharedDatabaseConnection {
     connection: Mutex<DatabaseConnection>,
     timeout: Option<Duration>,
+    client: redis::Client,
+}
+
+impl SharedDatabaseConnection {
+    pub fn get_dedicated(&self) -> DatabaseConnection {
+        DatabaseConnection::new(self.client.clone(), self.timeout)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
