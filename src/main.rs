@@ -19,11 +19,12 @@ use std::error::Error;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use broadcasting::broadcast_task;
+use bot_utils::broadcasting::Broadcaster;
+use broadcasting::RedisBackend;
 use clap::Parser;
 use database::DatabaseConnection;
 use redis::{ConnectionInfo, IntoConnectionInfo};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use url::Url;
 
 use crate::allris::AllrisUrl;
@@ -162,8 +163,7 @@ async fn main() -> ExitCode {
     let scraper_handle = tokio::spawn(scraper_task);
 
     // start the broadcasting task
-    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
-    let mut broadcaster_handle = tokio::spawn(broadcast_task(bot, db_client, ctrl_rx));
+    let mut broadcaster = Broadcaster::new(RedisBackend::new(bot, db_client));
 
     // listen for CTRL+C
     tokio::signal::ctrl_c()
@@ -177,17 +177,15 @@ async fn main() -> ExitCode {
 
     // wait until message queue is empty, unless CTRL+C is pressed a second time
     // or 20 seconds have passed
-    let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Soft);
     let success = tokio::select! {
-        _ = &mut broadcaster_handle => true,
+        _ = broadcaster.soft_shutdown() => true,
         _ = tokio::signal::ctrl_c() => false,
         _ = tokio::time::sleep(Duration::from_secs(20)) => false
     };
 
     if !success {
         log::warn!("Not all pending messages have been sent, shutting down anyway ...");
-        let _ = ctrl_tx.send(broadcasting::ShutdownSignal::Hard);
-        let _ = broadcaster_handle.await;
+        broadcaster.hard_shutdown().await;
     }
 
     // We want users to be able to stop broadcasts even if we're in the process of shutting down,

@@ -3,8 +3,6 @@ use std::fmt::Display;
 use frankenstein::methods::SendMessageParams;
 use serde::{Deserialize, Serialize};
 
-pub type ChatId = i64;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub request: SendMessageParams,
