@@ -1,6 +1,7 @@
+use bot_utils::Command;
 use frankenstein::ParseMode;
 
-use super::{Command, HandleMessage, HandlerResult};
+use super::{HandleMessage, HandlerResult};
 
 pub const COMMAND: Command = Command {
     name: "datenschutz",

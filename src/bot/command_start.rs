@@ -1,4 +1,6 @@
-use super::{Command, HandleMessage, HandlerResult, command_help, command_privacy};
+use bot_utils::Command;
+
+use super::{HandleMessage, HandlerResult, command_help, command_privacy};
 
 pub const COMMAND: Command = Command {
     name: "start",

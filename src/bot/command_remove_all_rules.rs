@@ -1,9 +1,10 @@
+use bot_utils::Command;
+use bot_utils::channel::SelectedChannel;
+use bot_utils::keyboard::{Button, Choice, Choices, remove_keyboard};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{WriteToMessage, concat};
 
-use super::keyboard::{Button, Choice, Choices};
-use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
-use crate::bot::keyboard::remove_keyboard;
+use super::{HandleMessage, HandlerResult};
 
 pub const COMMAND: Command = Command {
     name: "alle_regeln_loeschen",

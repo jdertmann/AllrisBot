@@ -1,9 +1,10 @@
+use bot_utils::Command;
+use bot_utils::channel::SelectedChannel;
+use bot_utils::keyboard::{Button, Choice, Choices, remove_keyboard};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, concat};
 
-use super::keyboard::{Button, Choice, Choices};
-use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
-use crate::bot::keyboard::remove_keyboard;
+use super::{HandleMessage, HandlerResult};
 use crate::types::Filter;
 
 pub const COMMAND: Command = Command {
@@ -21,7 +22,9 @@ pub struct RemoveFilterSelection {
     filters: Vec<Filter>,
 }
 
-impl<'a> Choice<'a> for (usize, &'a Filter) {
+struct ButtonStr<'a>(usize, &'a Filter);
+
+impl<'a> Choice<'a> for ButtonStr<'a> {
     type Action = Self;
 
     fn button(&self) -> Button<'a, Self::Action> {
@@ -33,6 +36,12 @@ impl<'a> Choice<'a> for (usize, &'a Filter) {
 }
 
 impl RemoveFilterSelection {
+    fn buttons(&self) -> impl Choices<ButtonStr<'_>> {
+        self.filters
+            .iter()
+            .enumerate()
+            .map(|(x, y)| ButtonStr(x, y))
+    }
     pub(super) async fn handle_message(
         self,
         cx: HandleMessage<'_>,
@@ -40,8 +49,8 @@ impl RemoveFilterSelection {
     ) -> HandlerResult {
         let chat_id = cx.selected_chat(&channel).await?;
 
-        match self.filters.iter().enumerate().match_action(cx.message) {
-            Some((i, filter)) => {
+        match self.buttons().match_action(cx.message) {
+            Some(ButtonStr(i, filter)) => {
                 let removed = cx
                     .inner
                     .database
@@ -69,7 +78,7 @@ impl RemoveFilterSelection {
                     "Bitte nutze die Schaltflächen, um einen Regel auszuwählen, oder sende /{} zum Abbrechen",
                     super::command_cancel::COMMAND.name
                 );
-                let reply_markup = self.filters.iter().enumerate().keyboard_markup();
+                let reply_markup = self.buttons().keyboard_markup();
                 respond!(cx, text, reply_markup).await
             }
         }
@@ -100,7 +109,11 @@ pub async fn handle_command(cx: HandleMessage<'_>, _: Option<&str>) -> HandlerRe
     }
 
     let (text, entities) = msg.build();
-    let reply_markup = filters.iter().enumerate().keyboard_markup();
+    let reply_markup = filters
+        .iter()
+        .enumerate()
+        .map(|(x, y)| ButtonStr(x, y))
+        .keyboard_markup();
     let state = RemoveFilterSelection { filters };
 
     cx.update_dialogue(state, dialogue.channel).await?;

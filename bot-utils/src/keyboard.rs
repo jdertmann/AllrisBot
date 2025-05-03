@@ -1,4 +1,6 @@
-//! Provides an abstraction over reply keyboards
+//! Provides an abstraction over reply keyboards.
+//!
+//! The api seems really awkward, but it works well in practice.
 
 use std::borrow::Cow;
 
@@ -7,7 +9,7 @@ use frankenstein::types::{
     ReplyKeyboardRemove, ReplyMarkup,
 };
 
-use super::SelectedChannel;
+use crate::channel::SelectedChannel;
 
 pub trait Choice<'a>: Sized {
     type Action: 'a;

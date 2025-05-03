@@ -1,5 +1,15 @@
-#[macro_use]
-mod macros;
+macro_rules! respond {
+    ($this:expr $(,$p:ident $(= $v:expr)?)* $(,)?)=> {
+        async {
+            ::bot_utils::respond!(
+                &$this.inner.bot,
+                $this.message,
+                 link_preview_options=crate::bot::DISABLE_LINK_PREVIEW
+                $(,$p $(= $v)?)*
+            ).await.map_err(crate::bot::Error::from)
+        }
+    };
+}
 
 mod command_cancel;
 mod command_help;
@@ -10,31 +20,34 @@ mod command_remove_rule;
 mod command_rules;
 mod command_start;
 mod command_target;
-mod get_updates;
-mod keyboard;
 
-use std::fmt::Display;
 use std::sync::Arc;
 
-use frankenstein::AsyncTelegramApi;
-use frankenstein::methods::{
-    GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
-    SetMyShortDescriptionParams,
+use bot_utils::channel::{SelectedChannel, selected_chat};
+use bot_utils::keyboard::remove_keyboard;
+use bot_utils::{
+    Command, CommandParser, UpdateHandler, can_send_messages, respond, set_my_commands,
 };
-use frankenstein::types::{BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message};
-use regex::Regex;
+use frankenstein::AsyncTelegramApi;
+use frankenstein::methods::{SetMyDescriptionParams, SetMyShortDescriptionParams};
+use frankenstein::types::{BotCommandScope, ChatMemberUpdated, LinkPreviewOptions, Message};
 use serde::{Deserialize, Serialize};
-use telegram_message_builder::{Error as MessageBuilderError, WriteToMessage, concat, text_link};
+use telegram_message_builder::Error as MessageBuilderError;
 use tokio::sync::oneshot;
 
 use self::command_new_rule::{PatternInput, TagSelection};
 use self::command_remove_all_rules::ConfirmRemoveAllFilters;
 use self::command_remove_rule::RemoveFilterSelection;
 use self::command_target::ChannelSelection;
-use self::get_updates::UpdateHandler;
-use self::keyboard::remove_keyboard;
 use crate::database::{self, SharedDatabaseConnection};
 
+const DISABLE_LINK_PREVIEW: LinkPreviewOptions = LinkPreviewOptions {
+    is_disabled: Some(true),
+    url: None,
+    prefer_large_media: None,
+    prefer_small_media: None,
+    show_above_text: None,
+};
 const SHORT_DESCRIPTION: &str = "Dieser Bot benachrichtigt dich, wenn im Ratsinformationssystem der Stadt Bonn neue Vorlagen veröffentlicht werden.";
 
 #[derive(Debug, thiserror::Error)]
@@ -104,23 +117,6 @@ macro_rules! states {
     };
 }
 
-struct Command {
-    name: &'static str,
-    description: &'static str,
-    group_admin: bool,
-    group_member: bool,
-    private_chat: bool,
-
-    #[allow(unused)]
-    admin: bool,
-}
-
-impl Display for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "/{} – {}", self.name, self.description)
-    }
-}
-
 commands! {
     command_new_rule,
     command_rules,
@@ -148,61 +144,8 @@ states! {
 struct MessageHandler {
     bot: crate::Bot,
     database: SharedDatabaseConnection,
-    command_regex: Regex,
+    command_parser: CommandParser,
     owner: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct SelectedChannel {
-    chat_id: i64,
-    username: Option<String>,
-    title: Option<String>,
-}
-
-impl SelectedChannel {
-    fn channel_id(&self) -> u64 {
-        (self.chat_id + 1_000_000_000_000).unsigned_abs()
-    }
-
-    fn hyperlink(&self) -> impl WriteToMessage + '_ {
-        let link = if let Some(username) = &self.username {
-            format!("https://t.me/{username}")
-        } else {
-            format!("https://t.me/c/{}", self.channel_id())
-        };
-
-        let title = telegram_message_builder::from_fn(|msg| {
-            if let Some(title) = &self.title {
-                msg.write(title)
-            } else if let Some(username) = &self.username {
-                msg.write(concat!("@", username))
-            } else {
-                msg.write("<unbekannt>")
-            }
-        });
-
-        text_link(link, concat!("„", title, "“"))
-    }
-
-    fn chat_selection(channel: &Option<Self>) -> impl WriteToMessage {
-        telegram_message_builder::from_fn(move |msg| match channel {
-            Some(channel) => {
-                msg.write("📢 ")?;
-                msg.write(channel.hyperlink())
-            }
-            None => msg.write("💬 Dieser Chat"),
-        })
-    }
-
-    fn chat_selection_accusative(channel: &Option<Self>) -> impl WriteToMessage {
-        telegram_message_builder::from_fn(move |msg| match channel {
-            Some(channel) => {
-                msg.write("den Kanal ")?;
-                msg.write(channel.hyperlink())
-            }
-            None => msg.write("diesen Chat"),
-        })
-    }
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,25 +160,8 @@ impl MessageHandler {
         scope: BotCommandScope,
         filter: impl Fn(&Command) -> bool,
     ) -> HandlerResult {
-        let commands = commands()
-            .iter()
-            .copied()
-            .filter(|cmd| filter(cmd))
-            .map(|cmd| {
-                BotCommand::builder()
-                    .command(cmd.name)
-                    .description(cmd.description)
-                    .build()
-            })
-            .collect();
-
-        let params = SetMyCommandsParams::builder()
-            .scope(scope)
-            .commands(commands)
-            .build();
-
-        self.bot.set_my_commands(&params).await?;
-
+        let filtered_commands = commands().iter().copied().filter(|cmd| filter(cmd));
+        set_my_commands(&self.bot, scope, filtered_commands).await?;
         Ok(())
     }
 
@@ -267,39 +193,19 @@ impl MessageHandler {
         database: SharedDatabaseConnection,
         owner: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let pattern = if let Some(username) = bot.get_me().await?.result.username {
-            &format!(
-                "^/([a-z0-9_]+)(?:@{})?(?:\\s+(.*))?$",
-                regex::escape(&username)
-            )
-        } else {
-            log::warn!("Bot has no username!");
-            "^/([a-z0-9_]+)(?:\\s+(.*))?$"
-        };
-
-        let command_regex = regex::RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .build()?;
+        let username = bot.get_me().await?.result.username;
+        let command_parser = CommandParser::new(username.as_deref());
 
         let handler = Self {
             bot,
             database,
-            command_regex,
+            command_parser,
             owner,
         };
 
         handler.prepare_bot().await?;
 
         Ok(handler)
-    }
-
-    fn parse_command<'a>(&self, text: &'a str) -> Option<(&'a str, Option<&'a str>)> {
-        self.command_regex.captures(text).map(|captures| {
-            let command = captures.get(1).unwrap().as_str();
-            let params = captures.get(2).map(|m| m.as_str());
-            (command, params)
-        })
     }
 }
 
@@ -321,8 +227,8 @@ impl HandleMessage<'_> {
                     return Err(Error::TopicsNotSupported);
                 }
 
-                if let Some((cmd, param)) = self.inner.parse_command(text) {
-                    return handle_command(self, cmd, param).await;
+                if let Some(parsed) = self.inner.command_parser.parse(text) {
+                    return handle_command(self, parsed.command, parsed.param).await;
                 }
             }
 
@@ -428,66 +334,32 @@ impl HandleMessage<'_> {
     }
 
     async fn selected_chat(self, channel: &Option<SelectedChannel>) -> HandlerResult<i64> {
-        macro_rules! user {
-            ($member:expr, $($variant:ident),+) => {
-                match $member {
-                    $(frankenstein::types::ChatMember::$variant(x) => {
-                        Some(&x.user)
-                    })+,
-                    _ => None
-                }
-            };
-        }
-
-        if let Some(channel) = channel {
-            let params = GetChatAdministratorsParams::builder()
-                .chat_id(channel.chat_id)
-                .build();
-
-            let authorized = self
-                .inner
-                .bot
-                .get_chat_administrators(&params)
-                .await?
-                .result
-                .iter()
-                .filter_map(|member| user!(member, Administrator, Creator))
-                .any(|user| user.id.try_into() == Ok(self.chat_id()));
-
-            if authorized {
-                Ok(channel.chat_id)
-            } else {
-                Err(Error::NotChannelAdmin(self.chat_id(), channel.chat_id))
-            }
-        } else {
-            Ok(self.chat_id())
-        }
+        let chat_id = selected_chat(&self.inner.bot, self.chat_id(), channel).await?;
+        chat_id.ok_or_else(|| {
+            let channel_id = channel.as_ref().map_or(0, |c| c.chat_id);
+            Error::NotChannelAdmin(self.chat_id(), channel_id)
+        })
     }
 }
 
-impl UpdateHandler for Arc<MessageHandler> {
+#[derive(Debug, Clone)]
+struct ArcMessageHandler(Arc<MessageHandler>);
+
+impl UpdateHandler for ArcMessageHandler {
     async fn handle_message(self, message: Message) {
         HandleMessage {
             message: &message,
-            inner: &self,
+            inner: &self.0,
         }
         .handle()
         .await
     }
 
     async fn handle_my_chat_member(self, update: ChatMemberUpdated) {
-        let can_send_messages = match update.new_chat_member {
-            ChatMember::Administrator(member) => member.can_post_messages.unwrap_or(true),
-            ChatMember::Restricted(member) => member.can_send_messages,
-            ChatMember::Left(_) => false,
-            ChatMember::Kicked(_) => false,
-            _ => true,
-        };
-
-        if !can_send_messages {
+        if !can_send_messages(&update.new_chat_member) {
             let delete_chat = async {
-                self.database.remove_subscription(update.chat.id).await?;
-                self.database.remove_dialogue(update.chat.id).await?;
+                self.0.database.remove_subscription(update.chat.id).await?;
+                self.0.database.remove_dialogue(update.chat.id).await?;
                 HandlerResult::Ok(())
             };
 
@@ -510,5 +382,5 @@ pub async fn run(
         .await
         .unwrap();
 
-    get_updates::handle_updates(bot, Arc::new(message_handler), shutdown).await
+    bot_utils::handle_updates(bot, ArcMessageHandler(Arc::new(message_handler)), shutdown).await
 }

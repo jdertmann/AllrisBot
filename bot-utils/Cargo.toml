@@ -5,6 +5,13 @@ edition = "2024"
 
 [dependencies]
 frankenstein = { version = "0.40", features = ["trait-async"] }
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, optional = true }
 log = "0.4"
-tokio = { version = "1.44.2", features = ["sync", "time", "rt-multi-thread", "macros"] }
+regex = "1.11"
+serde = "1.0"
+telegram-message-builder = { version = "0.1", path = "../telegram-message-builder" }
+tokio = { version = "1.44.2", features = ["sync", "time", "rt-multi-thread", "macros"], optional = true }
+
+[features]
+broadcasting = ["tokio", "futures-util/alloc"]
+get-updates = ["tokio", "futures-util" ]

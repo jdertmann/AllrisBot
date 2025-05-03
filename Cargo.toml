@@ -14,7 +14,7 @@ repository = "https://github.com/jdertmann/AllrisBot"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-bot-utils = { path = "bot-utils" }
+bot-utils = { path = "bot-utils", features = ["broadcasting", "get-updates"] }
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"

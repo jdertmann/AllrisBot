@@ -1,7 +1,7 @@
+use bot_utils::keyboard::remove_keyboard;
 use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, concat};
 
 use super::{Command, HandleMessage, HandlerResult, SelectedChannel};
-use crate::bot::keyboard::remove_keyboard;
 
 pub const COMMAND: Command = Command {
     name: "regeln",

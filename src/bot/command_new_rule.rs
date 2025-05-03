@@ -1,14 +1,14 @@
 use std::convert::identity;
 use std::iter;
 
+use bot_utils::Command;
+use bot_utils::channel::SelectedChannel;
+use bot_utils::keyboard::{Button, Choice, Choices, force_reply, remove_keyboard};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{MessageBuilder, WriteToMessage, bold, code, concat, pre};
 
-use super::keyboard::{force_reply, remove_keyboard};
-use super::{Command, Error, SelectedChannel};
-use crate::bot::keyboard::{Button, Choice, Choices};
-use crate::bot::{HandleMessage, HandlerResult};
+use super::{Error, HandleMessage, HandlerResult};
 use crate::types::{Condition, Filter, Tag};
 
 pub const COMMAND: Command = Command {

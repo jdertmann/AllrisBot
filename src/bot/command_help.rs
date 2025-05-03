@@ -1,12 +1,12 @@
 use std::sync::OnceLock;
 
+use bot_utils::Command;
 use frankenstein::types::MessageEntity;
 use telegram_message_builder::{WriteToMessage, bold, concat, from_fn, italic, text_link};
 
-use super::{Command, HandleMessage, HandlerResult, command_privacy};
-use crate::bot::{
-    command_cancel, command_help, command_new_rule, command_remove_all_rules, command_remove_rule,
-    command_rules, command_start, command_target,
+use super::{
+    HandleMessage, HandlerResult, command_cancel, command_help, command_new_rule, command_privacy,
+    command_remove_all_rules, command_remove_rule, command_rules, command_start, command_target,
 };
 
 pub const COMMAND: Command = Command {

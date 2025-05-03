@@ -1,8 +1,8 @@
+use bot_utils::keyboard::{Button, Choice, Choices, remove_keyboard};
 use frankenstein::types::{ChatAdministratorRights, KeyboardButtonRequestChat};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{WriteToMessage, concat};
 
-use super::keyboard::{Button, Choice, Choices, remove_keyboard};
 use super::{Command, Error, HandleMessage, HandlerResult, SelectedChannel};
 
 pub const COMMAND: Command = Command {

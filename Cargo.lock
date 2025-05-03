@@ -205,6 +205,9 @@ dependencies = [
  "frankenstein",
  "futures-util",
  "log",
+ "regex",
+ "serde",
+ "telegram-message-builder",
  "tokio",
 ]
 

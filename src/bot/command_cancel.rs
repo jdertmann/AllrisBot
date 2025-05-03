@@ -1,5 +1,7 @@
-use super::keyboard::remove_keyboard;
-use super::{Command, DialogueState, HandleMessage, HandlerResult};
+use bot_utils::Command;
+use bot_utils::keyboard::remove_keyboard;
+
+use super::{DialogueState, HandleMessage, HandlerResult};
 
 pub const COMMAND: Command = Command {
     name: "abbrechen",

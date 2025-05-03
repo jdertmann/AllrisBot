@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
+use crate::ChatId;
+
 const CLEANUP_PERIOD: Duration = Duration::from_secs(300);
 
 pub trait UpdateHandler: Clone + Send + 'static {
@@ -20,7 +23,7 @@ pub trait UpdateHandler: Clone + Send + 'static {
     fn handle_my_chat_member(self, update: ChatMemberUpdated) -> impl Future<Output = ()> + Send;
 }
 
-fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>>>) {
+fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<ChatId, Weak<Mutex<()>>>) {
     let now = Instant::now();
 
     if now - *last_cleanup < CLEANUP_PERIOD {
@@ -34,12 +37,14 @@ fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>
 
 /// Gets new incoming messages and calls `handler` on them, while ensuring that no messages
 /// from the same chat are processed in parallel.
-pub async fn handle_updates(
-    bot: crate::Bot,
+pub async fn handle_updates<B: AsyncTelegramApi>(
+    bot: B,
     handler: impl UpdateHandler,
     mut shutdown: oneshot::Receiver<()>,
-) {
-    let mut mutexes: HashMap<i64, Weak<Mutex<()>>> = HashMap::new();
+) where
+    B::Error: Display + Debug,
+{
+    let mut mutexes: HashMap<ChatId, Weak<Mutex<()>>> = HashMap::new();
     let mut last_cleanup = Instant::now();
 
     let mut join_set = JoinSet::new();
