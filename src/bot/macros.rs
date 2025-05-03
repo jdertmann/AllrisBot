@@ -8,9 +8,14 @@ macro_rules! respond {
         } else {
             None
         };
+        let thread_id = $this.message
+            .is_topic_message
+            .unwrap_or(false)
+            .then_some($this.message.message_thread_id)
+            .flatten();
         let params = ::frankenstein::methods::SendMessageParams::builder()
             .chat_id($this.chat_id())
-            .maybe_message_thread_id($this.message.message_thread_id)
+            .maybe_message_thread_id(thread_id)
             .maybe_reply_parameters(reply_parameters)
             .link_preview_options(::frankenstein::types::LinkPreviewOptions::builder().is_disabled(true).build())
             $(.$p(respond!(@param $p $($v)?)))*

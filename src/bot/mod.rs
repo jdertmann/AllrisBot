@@ -317,7 +317,7 @@ impl HandleMessage<'_> {
             }
 
             if let Some(text) = &self.message.text {
-                if self.message.message_thread_id.is_some() {
+                if self.message.is_topic_message == Some(true) {
                     return Err(Error::TopicsNotSupported);
                 }
 
