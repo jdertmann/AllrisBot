@@ -4,7 +4,6 @@ use std::time::Duration;
 use bot_utils::ChatId;
 use bot_utils::broadcasting::{Backend, NextUpdate};
 use frankenstein::AsyncTelegramApi as _;
-use frankenstein::types::LinkPreviewOptions;
 use futures_util::{Stream, StreamExt, stream};
 use regex::Regex;
 use tokio::time::sleep;
@@ -165,7 +164,6 @@ impl Backend for RedisBackend {
         let message = &message.1;
         let mut params = message.request.clone();
         params.chat_id = chat_id.into();
-        params.link_preview_options = Some(LinkPreviewOptions::builder().is_disabled(true).build());
 
         self.bot.send_message(&params).await?;
 
