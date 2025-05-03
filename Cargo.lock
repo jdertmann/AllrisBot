@@ -30,6 +30,7 @@ dependencies = [
 name = "allrisbot"
 version = "0.1.0"
 dependencies = [
+ "bot-utils",
  "chrono",
  "clap",
  "env_logger",
@@ -195,6 +196,16 @@ dependencies = [
  "quote",
  "rustversion",
  "syn",
+]
+
+[[package]]
+name = "bot-utils"
+version = "0.1.0"
+dependencies = [
+ "frankenstein",
+ "futures-util",
+ "log",
+ "tokio",
 ]
 
 [[package]]

@@ -189,8 +189,6 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> Cache<K, V, E> {
     }
 }
 
-
-
 pub type LruCache<K, V> = Cache<K, V, Lru<K>>;
 
 #[cfg(test)]
