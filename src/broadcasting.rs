@@ -49,7 +49,7 @@ pub struct RedisBackend {
 
 impl RedisBackend {
     pub fn new(bot: crate::Bot, db: redis::Client) -> Self {
-        let db = DatabaseConnection::new(db, None).shared();
+        let db = DatabaseConnection::new(db, None).into_shared();
         let cache = LruCache::new(Lru::new(30));
 
         Self { bot, db, cache }

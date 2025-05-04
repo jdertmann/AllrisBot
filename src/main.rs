@@ -89,12 +89,11 @@ struct Args {
 
 fn parse_redis_url(input: &str) -> Result<ConnectionInfo, String> {
     let url = Url::parse(input).map_err(|e| e.to_string())?;
-    let info = url.into_connection_info().map_err(
+    url.into_connection_info().map_err(
         // the `redis` crate implements no other way to get to a human-friendly error description
         #[allow(deprecated)]
         |e| e.description().to_string(),
-    )?;
-    Ok(info)
+    )
 }
 
 fn parse_owner_username(mut input: &str) -> Result<String, String> {
@@ -146,7 +145,7 @@ async fn main() -> ExitCode {
 
         let handle = tokio::spawn(bot::run(
             bot.clone(),
-            DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).shared(),
+            DatabaseConnection::new(db_client.clone(), Some(Duration::from_secs(6))).into_shared(),
             args.owner,
             rx,
         ));
@@ -197,4 +196,23 @@ async fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_owner_username;
+
+    #[test]
+    fn test_parse_username() {
+        let test_cases = [
+            ("@abcD123", Some("abcD123")),
+            ("dsgz_sfdnj", Some("dsgz_sfdnj")),
+            ("@@wrong", None),
+            ("abc!", None),
+        ];
+
+        for (input, expected) in test_cases {
+            assert_eq!(parse_owner_username(input).ok().as_deref(), expected)
+        }
+    }
 }
