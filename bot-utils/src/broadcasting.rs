@@ -82,6 +82,7 @@ type SendMessage<B> = (ScheduledMessage<B>, oneshot::Sender<OneshotResponse<B>>)
 pub enum NextUpdate<B: Backend> {
     Ready { id: B::UpdateId, msg: B::Message },
     Skipped { id: B::UpdateId },
+    OutOfSync,
     Pending { previous: B::UpdateId },
     Migrated { to: ChatId },
     Stopped,
@@ -281,13 +282,8 @@ async fn try_process_next<B: Backend>(
 
     let (id, message) = match shared.backend.next_update(chat_id).await? {
         NextUpdate::Ready { id, msg: next } => (id, next),
-        NextUpdate::Skipped { id } => {
-            if shared.backend.acknowledge(chat_id, id).await? {
-                return Ok(ChatStatus::Processed(id));
-            } else {
-                return Ok(ChatStatus::OutOfSync);
-            }
-        }
+        NextUpdate::Skipped { id } => return Ok(ChatStatus::Processed(id)),
+        NextUpdate::OutOfSync => return Ok(ChatStatus::OutOfSync),
         NextUpdate::Pending { previous: last } => return Ok(ChatStatus::Processed(last)),
         NextUpdate::Migrated { to } => return Ok(ChatStatus::MigratedTo(to)),
         NextUpdate::Stopped => return Ok(ChatStatus::Stopped),

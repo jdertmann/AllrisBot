@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use frankenstein::methods::SendMessageParams;
-use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup, ReplyMarkup};
+use frankenstein::types::{
+    InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyMarkup,
+};
 use futures_util::{Stream, TryStreamExt};
 use oparl::{Consultation, Paper, get_organization};
 use reqwest::{Client, Response};
@@ -236,6 +238,7 @@ async fn generate_notification(client: &Client, paper: &Paper) -> Option<Message
         .chat_id(0)
         .text(text)
         .entities(entities)
+        .link_preview_options(LinkPreviewOptions::builder().is_disabled(true).build())
         .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard))
         .build();
 

@@ -4,7 +4,6 @@ use std::time::Duration;
 use bot_utils::ChatId;
 use bot_utils::broadcasting::{Backend, NextUpdate};
 use frankenstein::AsyncTelegramApi as _;
-use frankenstein::types::LinkPreviewOptions;
 use futures_util::{Stream, StreamExt, stream};
 use regex::Regex;
 use tokio::time::sleep;
@@ -119,8 +118,11 @@ impl Backend for RedisBackend {
                 NextUpdate::Ready { id: msg.0, msg }
             }
             Some(msg) => {
-                self.acknowledge(chat, msg.0).await?;
-                NextUpdate::Skipped { id: msg.0 }
+                if self.acknowledge(chat, msg.0).await? {
+                    NextUpdate::Skipped { id: msg.0 }
+                } else {
+                    NextUpdate::OutOfSync
+                }
             }
             None => NextUpdate::Pending {
                 previous: last_sent,
@@ -165,7 +167,6 @@ impl Backend for RedisBackend {
         let message = &message.1;
         let mut params = message.request.clone();
         params.chat_id = chat_id.into();
-        params.link_preview_options = Some(LinkPreviewOptions::builder().is_disabled(true).build());
 
         self.bot.send_message(&params).await?;
 
