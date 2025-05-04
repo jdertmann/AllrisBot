@@ -118,8 +118,11 @@ impl Backend for RedisBackend {
                 NextUpdate::Ready { id: msg.0, msg }
             }
             Some(msg) => {
-                self.acknowledge(chat, msg.0).await?;
-                NextUpdate::Skipped { id: msg.0 }
+                if self.acknowledge(chat, msg.0).await? {
+                    NextUpdate::Skipped { id: msg.0 }
+                } else {
+                    NextUpdate::OutOfSync
+                }
             }
             None => NextUpdate::Pending {
                 previous: last_sent,
