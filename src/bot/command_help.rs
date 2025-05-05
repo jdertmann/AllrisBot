@@ -96,8 +96,9 @@ fn about_paragraph(owner: Option<&str>) -> impl WriteToMessage {
 
         write!(
             msg,
-            "Der Quellcode dieses Bots ist öffentlich zugänglich: {}",
+            "Der Quellcode dieses Bots ist öffentlich zugänglich: {} (Version {})",
             env!("CARGO_PKG_REPOSITORY"),
+            env!("CARGO_PKG_VERSION")
         )?;
 
         if let Some(owner) = owner {

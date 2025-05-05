@@ -145,7 +145,7 @@ impl DatabaseConnection {
         }
     }
 
-    pub fn shared(self) -> SharedDatabaseConnection {
+    pub fn into_shared(self) -> SharedDatabaseConnection {
         SharedDatabaseConnection {
             client: self.client.clone(),
             timeout: self.timeout,
