@@ -243,6 +243,16 @@ impl WriteToMessage for &dyn WriteToMessage {
     }
 }
 
+impl WriteToMessage for Box<dyn WriteToMessage> {
+    fn write_to(&self, message: &mut MessageBuilder) -> Result<(), Error> {
+        (**self).write_to(message)
+    }
+
+    fn to_message(&self) -> Result<(String, Vec<MessageEntity>), Error> {
+        (**self).to_message()
+    }
+}
+
 impl<T: Display> WriteToMessage for T {
     fn write_to(&self, message: &mut MessageBuilder) -> Result<(), Error> {
         write!(message, "{self}")
