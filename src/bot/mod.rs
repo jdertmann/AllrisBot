@@ -10,19 +10,21 @@ mod command_remove_rule;
 mod command_rules;
 mod command_start;
 mod command_target;
-mod get_updates;
 mod keyboard;
 
 use std::fmt::Display;
 use std::sync::Arc;
 
 use bot_utils::command::{CommandParser, ParsedCommand};
+use bot_utils::updates::UpdateHandler;
 use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::{
     GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
     SetMyShortDescriptionParams,
 };
-use frankenstein::types::{BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message};
+use frankenstein::types::{
+    AllowedUpdate, BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message,
+};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{Error as MessageBuilderError, WriteToMessage, concat, text_link};
 use tokio::sync::oneshot;
@@ -31,7 +33,6 @@ use self::command_new_rule::{PatternInput, TagSelection};
 use self::command_remove_all_rules::ConfirmRemoveAllFilters;
 use self::command_remove_rule::RemoveFilterSelection;
 use self::command_target::ChannelSelection;
-use self::get_updates::UpdateHandler;
 use self::keyboard::remove_keyboard;
 use crate::database::{self, SharedDatabaseConnection};
 
@@ -494,5 +495,11 @@ pub async fn run(
         .await
         .unwrap();
 
-    get_updates::handle_updates(bot, ArcMessageHandler(Arc::new(message_handler)), shutdown).await
+    bot_utils::updates::handle_updates(
+        bot,
+        ArcMessageHandler(Arc::new(message_handler)),
+        vec![AllowedUpdate::Message, AllowedUpdate::MyChatMember],
+        shutdown,
+    )
+    .await
 }
