@@ -7,4 +7,5 @@ edition = "2024"
 frankenstein = { version = "0.40", features = ["trait-async"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
+regex = "1.11.1"
 tokio = { version = "1.44.2", features = ["sync", "time", "rt-multi-thread", "macros"] }

@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::GetUpdatesParams;
-use frankenstein::types::{AllowedUpdate, ChatMemberUpdated, Message};
+use frankenstein::types::{
+    AllowedUpdate, CallbackQuery, ChatMemberUpdated, MaybeInaccessibleMessage, Message,
+};
 use frankenstein::updates::UpdateContent;
 use futures_util::FutureExt;
 use tokio::select;
@@ -14,10 +17,19 @@ use tokio::time::sleep;
 
 const CLEANUP_PERIOD: Duration = Duration::from_secs(300);
 
+#[allow(unused_variables)]
 pub trait UpdateHandler: Clone + Send + 'static {
-    fn handle_message(self, message: Message) -> impl Future<Output = ()> + Send;
+    fn handle_message(self, message: Message) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 
-    fn handle_my_chat_member(self, update: ChatMemberUpdated) -> impl Future<Output = ()> + Send;
+    fn handle_my_chat_member(self, update: ChatMemberUpdated) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    fn handle_callback_query(self, update: CallbackQuery) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>>>) {
@@ -34,9 +46,10 @@ fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>
 
 /// Gets new incoming messages and calls `handler` on them, while ensuring that no messages
 /// from the same chat are processed in parallel.
-pub async fn handle_updates(
-    bot: crate::Bot,
+pub async fn handle_updates<B: AsyncTelegramApi<Error: Display>>(
+    bot: B,
     handler: impl UpdateHandler,
+    allowed_updates: Vec<AllowedUpdate>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut mutexes: HashMap<i64, Weak<Mutex<()>>> = HashMap::new();
@@ -47,7 +60,7 @@ pub async fn handle_updates(
 
     let mut params = GetUpdatesParams::builder()
         .timeout(30)
-        .allowed_updates(vec![AllowedUpdate::Message, AllowedUpdate::MyChatMember])
+        .allowed_updates(allowed_updates)
         .build();
 
     loop {
@@ -65,8 +78,16 @@ pub async fn handle_updates(
                     let chat = match &update.content {
                         UpdateContent::Message(msg) => &*msg.chat,
                         UpdateContent::MyChatMember(member) => &member.chat,
+                        UpdateContent::CallbackQuery(query) => match &query.message {
+                            Some(MaybeInaccessibleMessage::InaccessibleMessage(m)) => &m.chat,
+                            Some(MaybeInaccessibleMessage::Message(m)) => &m.chat,
+                            None => {
+                                log::warn!("Unsupported!");
+                                continue;
+                            }
+                        },
                         _ => {
-                            log::warn!("Received unexpected update: {:?}", update.content);
+                            log::warn!("Received unsupported update: {:?}", update.content);
                             continue;
                         }
                     };
@@ -98,6 +119,9 @@ pub async fn handle_updates(
                             UpdateContent::Message(msg) => handler.handle_message(msg).await,
                             UpdateContent::MyChatMember(msg) => {
                                 handler.handle_my_chat_member(msg).await
+                            }
+                            UpdateContent::CallbackQuery(q) => {
+                                handler.handle_callback_query(q).await;
                             }
                             _ => log::warn!("Unreachable code reached!"),
                         }

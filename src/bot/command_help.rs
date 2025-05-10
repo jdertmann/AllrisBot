@@ -90,6 +90,20 @@ fn regex_paragraph() -> impl WriteToMessage {
     )
 }
 
+fn disclaimer_paragraph() -> impl WriteToMessage {
+    concat!(
+        bold("⚖️ Hinweis"),
+        "\nDieser Bot ist ein rein privates, nicht-kommerzielles Projekt zur \
+        automatischen Benachrichtigung über neue Vorlagen aus dem ALLRIS®-System der Stadt Bonn. \
+        Er steht weder in Verbindung zur Firma CC e-gov GmbH noch zur Stadt Bonn. \n",
+        bold(
+            "Für Vollständigkeit, Richtigkeit oder Aktualität der bereitgestellten \
+            Informationen wird keine Gewähr übernommen.",
+        ),
+        "\n",
+    )
+}
+
 fn about_paragraph(owner: Option<&str>) -> impl WriteToMessage {
     from_fn(move |msg| {
         msg.writeln(bold("👨‍💻 Mehr Infos & Kontakt"))?;
@@ -123,6 +137,7 @@ fn message(group: bool, owner: Option<&str>) -> (String, Vec<MessageEntity>) {
 
         msg.writeln(miscellaneous_paragraph())?;
         msg.writeln(regex_paragraph())?;
+        msg.writeln(disclaimer_paragraph())?;
         msg.write(about_paragraph(owner))
     })
     .to_message()

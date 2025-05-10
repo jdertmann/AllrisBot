@@ -10,19 +10,21 @@ mod command_remove_rule;
 mod command_rules;
 mod command_start;
 mod command_target;
-mod get_updates;
 mod keyboard;
 
 use std::fmt::Display;
 use std::sync::Arc;
 
+use bot_utils::command::{CommandParser, ParsedCommand};
+use bot_utils::updates::UpdateHandler;
 use frankenstein::AsyncTelegramApi;
 use frankenstein::methods::{
     GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
     SetMyShortDescriptionParams,
 };
-use frankenstein::types::{BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message};
-use regex::Regex;
+use frankenstein::types::{
+    AllowedUpdate, BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message,
+};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{Error as MessageBuilderError, WriteToMessage, concat, text_link};
 use tokio::sync::oneshot;
@@ -31,7 +33,6 @@ use self::command_new_rule::{PatternInput, TagSelection};
 use self::command_remove_all_rules::ConfirmRemoveAllFilters;
 use self::command_remove_rule::RemoveFilterSelection;
 use self::command_target::ChannelSelection;
-use self::get_updates::UpdateHandler;
 use self::keyboard::remove_keyboard;
 use crate::database::{self, SharedDatabaseConnection};
 
@@ -148,7 +149,7 @@ states! {
 struct MessageHandler {
     bot: crate::Bot,
     database: SharedDatabaseConnection,
-    command_regex: Regex,
+    command_parser: CommandParser,
     owner: Option<String>,
 }
 
@@ -267,39 +268,18 @@ impl MessageHandler {
         database: SharedDatabaseConnection,
         owner: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let pattern = if let Some(username) = bot.get_me().await?.result.username {
-            &format!(
-                "^/([a-z0-9_]+)(?:@{})?(?:\\s+(.*))?$",
-                regex::escape(&username)
-            )
-        } else {
-            log::warn!("Bot has no username!");
-            "^/([a-z0-9_]+)(?:\\s+(.*))?$"
-        };
-
-        let command_regex = regex::RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .build()?;
+        let command_parser = CommandParser::new(bot.get_me().await?.result.username.as_deref());
 
         let handler = Self {
             bot,
             database,
-            command_regex,
+            command_parser,
             owner,
         };
 
         handler.prepare_bot().await?;
 
         Ok(handler)
-    }
-
-    fn parse_command<'a>(&self, text: &'a str) -> Option<(&'a str, Option<&'a str>)> {
-        self.command_regex.captures(text).map(|captures| {
-            let command = captures.get(1).unwrap().as_str();
-            let params = captures.get(2).map(|m| m.as_str());
-            (command, params)
-        })
     }
 }
 
@@ -321,8 +301,10 @@ impl HandleMessage<'_> {
                     return Err(Error::TopicsNotSupported);
                 }
 
-                if let Some((cmd, param)) = self.inner.parse_command(text) {
-                    return handle_command(self, cmd, param).await;
+                if let Some(ParsedCommand { command, param, .. }) =
+                    self.inner.command_parser.parse(text)
+                {
+                    return handle_command(self, command, param).await;
                 }
             }
 
@@ -465,11 +447,14 @@ impl HandleMessage<'_> {
     }
 }
 
-impl UpdateHandler for Arc<MessageHandler> {
+#[derive(Debug, Clone)]
+pub struct ArcMessageHandler(Arc<MessageHandler>);
+
+impl UpdateHandler for ArcMessageHandler {
     async fn handle_message(self, message: Message) {
         HandleMessage {
             message: &message,
-            inner: &self,
+            inner: &self.0,
         }
         .handle()
         .await
@@ -486,8 +471,8 @@ impl UpdateHandler for Arc<MessageHandler> {
 
         if !can_send_messages {
             let delete_chat = async {
-                self.database.remove_subscription(update.chat.id).await?;
-                self.database.remove_dialogue(update.chat.id).await?;
+                self.0.database.remove_subscription(update.chat.id).await?;
+                self.0.database.remove_dialogue(update.chat.id).await?;
                 HandlerResult::Ok(())
             };
 
@@ -510,5 +495,11 @@ pub async fn run(
         .await
         .unwrap();
 
-    get_updates::handle_updates(bot, Arc::new(message_handler), shutdown).await
+    bot_utils::updates::handle_updates(
+        bot,
+        ArcMessageHandler(Arc::new(message_handler)),
+        vec![AllowedUpdate::Message, AllowedUpdate::MyChatMember],
+        shutdown,
+    )
+    .await
 }
