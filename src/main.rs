@@ -25,6 +25,7 @@ use clap::Parser;
 use database::DatabaseConnection;
 use redis::{ConnectionInfo, IntoConnectionInfo};
 use tokio::sync::oneshot;
+use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use crate::allris::AllrisUrl;
@@ -110,19 +111,24 @@ fn parse_owner_username(mut input: &str) -> Result<String, String> {
 
 fn init_logging(args: &Args) {
     let log_level = match (args.quiet, args.verbose) {
-        (true, _) => log::LevelFilter::Off,
-        (_, 0) => log::LevelFilter::Error,
-        (_, 1) => log::LevelFilter::Warn,
-        (_, 2) => log::LevelFilter::Info,
-        (_, 3) => log::LevelFilter::Debug,
-        _ => log::LevelFilter::Trace,
+        (true, _) => "off",
+        (_, 0) => "error",
+        (_, 1) => "warn",
+        (_, 2) => "info",
+        (_, 3) => "debug",
+        _ => "trace",
     };
 
-    env_logger::Builder::from_default_env()
-        .filter_level(log_level)
-        .filter_module("scraper", log::LevelFilter::Off)
-        .filter_module("selectors", log::LevelFilter::Off)
-        .filter_module("html5ever", log::LevelFilter::Off)
+    // Build the subscriber with filtering and formatting
+    let filter = EnvFilter::builder()
+        .parse(format!(
+            "{log_level},scraper=off,selectors=off,html5ever=off,h2=warn,hyper_util=warn"
+        ))
+        .unwrap();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
         .init();
 }
 

@@ -22,9 +22,7 @@ use frankenstein::methods::{
     GetChatAdministratorsParams, SetMyCommandsParams, SetMyDescriptionParams,
     SetMyShortDescriptionParams,
 };
-use frankenstein::types::{
-    AllowedUpdate, BotCommand, BotCommandScope, ChatMember, ChatMemberUpdated, Message,
-};
+use frankenstein::types::{AllowedUpdate, BotCommand, BotCommandScope, ChatMemberUpdated, Message};
 use serde::{Deserialize, Serialize};
 use telegram_message_builder::{Error as MessageBuilderError, WriteToMessage, concat, text_link};
 use tokio::sync::oneshot;
@@ -461,25 +459,21 @@ impl UpdateHandler for ArcMessageHandler {
     }
 
     async fn handle_my_chat_member(self, update: ChatMemberUpdated) {
-        let can_send_messages = match update.new_chat_member {
-            ChatMember::Administrator(member) => member.can_post_messages.unwrap_or(true),
-            ChatMember::Restricted(member) => member.can_send_messages,
-            ChatMember::Left(_) => false,
-            ChatMember::Kicked(_) => false,
-            _ => true,
-        };
+        let can_send_messages = bot_utils::can_send_messages(&update.new_chat_member);
 
         if !can_send_messages {
+            let chat_id = update.chat.id;
+
             let delete_chat = async {
-                self.0.database.remove_subscription(update.chat.id).await?;
-                self.0.database.remove_dialogue(update.chat.id).await?;
+                self.0.database.remove_subscription(chat_id).await?;
+                self.0.database.remove_dialogue(chat_id).await?;
                 HandlerResult::Ok(())
             };
 
             if let Err(e) = delete_chat.await {
-                log::error!("Unable to delete chat {}: {e}", update.chat.id)
+                log::error!("Unable to delete chat {chat_id}: {e}")
             } else {
-                log::info!("Chat was deleted!");
+                log::info!("Chat {chat_id} was deleted!");
             }
         }
     }

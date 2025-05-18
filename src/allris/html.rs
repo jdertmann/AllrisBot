@@ -64,7 +64,7 @@ pub async fn scrape_website(client: &Client, url: &Url) -> Result<WebsiteData, E
         verfasser: select!(document, "#voverfasser1").map(extract_text).next(),
         unterstuetzer: select!(document, "#anunterstuetzer")
             .next()
-            .map(|el| el.text().map(|x| x.trim().to_string()).collect())
+            .map(|el| el.text().map(str::trim).map(str::to_owned).collect())
             .unwrap_or_default(),
         amt: select!(document, "#vofamt").map(extract_text).next(),
         beteiligt,
