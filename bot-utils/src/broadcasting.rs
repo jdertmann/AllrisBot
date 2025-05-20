@@ -161,10 +161,10 @@ impl<B: Backend> ScheduledMessage<B> {
             };
         }
 
-        let response = response.map_err(crate::response::map_error);
+        let response = response.as_ref().map_err(crate::response::map_error);
 
         let result = match response {
-            Ok(()) => ChatStatus::Processed(self.update),
+            Ok(_) => ChatStatus::Processed(self.update),
             Err(RequestError::InvalidToken) => {
                 tracing::error!("Invalid token! Was it revoked?");
                 shared.hard_shutdown.send_replace(true);
@@ -186,11 +186,11 @@ impl<B: Backend> ScheduledMessage<B> {
                 ChatStatus::MigratedTo(new_chat_id)
             }
             Err(RequestError::RetryAfter(dur)) => retry_with_backoff!(dur),
-            Err(RequestError::ClientError(_)) => {
+            Err(RequestError::ClientError) => {
                 tracing::error!("Client error, won't retry!");
                 ChatStatus::Processed(self.update)
             }
-            Err(RequestError::Other(_)) => {
+            Err(RequestError::Other) => {
                 if let Some(backoff) = backoff {
                     retry_with_backoff!(backoff)
                 } else {

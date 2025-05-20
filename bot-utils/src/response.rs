@@ -9,8 +9,8 @@ pub enum RequestError {
     ChatMigrated(i64),
     BotBlocked,
     RetryAfter(Duration),
-    ClientError(ErrorResponse),
-    Other(Error),
+    ClientError,
+    Other,
 }
 
 /// error messages that imply we're not allowed to send messages
@@ -32,9 +32,9 @@ const TELEGRAM_ERRORS: [&str; 14] = [
     "Forbidden: user is deactivated",
 ];
 
-pub fn map_error(e: frankenstein::Error) -> RequestError {
+pub fn map_error(e: &frankenstein::Error) -> RequestError {
     let Error::Api(api_error) = e else {
-        return RequestError::Other(e);
+        return RequestError::Other;
     };
 
     match api_error {
@@ -50,7 +50,7 @@ pub fn map_error(e: frankenstein::Error) -> RequestError {
                     ..
                 }),
             ..
-        } => RequestError::ChatMigrated(new_chat_id),
+        } => RequestError::ChatMigrated(*new_chat_id),
 
         ErrorResponse { description, .. } if TELEGRAM_ERRORS.contains(&description.as_str()) => {
             RequestError::BotBlocked
@@ -63,65 +63,13 @@ pub fn map_error(e: frankenstein::Error) -> RequestError {
                     ..
                 }),
             ..
-        } => RequestError::RetryAfter(Duration::from_secs(secs as u64)),
-
-        e @ ErrorResponse {
-            error_code: 400..=499,
-            ..
-        } => RequestError::ClientError(e),
-
-        e => RequestError::Other(Error::Api(e)),
-    }
-}
-
-#[derive(Debug)]
-pub enum RequestErrorRef {
-    InvalidToken,
-    ChatMigrated(i64),
-    BotBlocked,
-    RetryAfter(Duration),
-    ClientError,
-    Other,
-}
-
-pub fn map_error_ref(e: &frankenstein::Error) -> RequestErrorRef {
-    let Error::Api(api_error) = e else {
-        return RequestErrorRef::Other;
-    };
-
-    match api_error {
-        ErrorResponse {
-            error_code: 401 | 404,
-            ..
-        } => RequestErrorRef::InvalidToken,
-
-        ErrorResponse {
-            parameters:
-                Some(ResponseParameters {
-                    migrate_to_chat_id: Some(new_chat_id),
-                    ..
-                }),
-            ..
-        } => RequestErrorRef::ChatMigrated(*new_chat_id),
-
-        ErrorResponse { description, .. } if TELEGRAM_ERRORS.contains(&description.as_str()) => {
-            RequestErrorRef::BotBlocked
-        }
-
-        ErrorResponse {
-            parameters:
-                Some(ResponseParameters {
-                    retry_after: Some(secs),
-                    ..
-                }),
-            ..
-        } => RequestErrorRef::RetryAfter(Duration::from_secs(*secs as u64)),
+        } => RequestError::RetryAfter(Duration::from_secs(*secs as u64)),
 
         ErrorResponse {
             error_code: 400..=499,
             ..
-        } => RequestErrorRef::ClientError,
+        } => RequestError::ClientError,
 
-        _ => RequestErrorRef::Other,
+        _ => RequestError::Other,
     }
 }
