@@ -204,7 +204,6 @@ version = "0.1.0"
 dependencies = [
  "frankenstein",
  "futures-util",
- "log",
  "regex",
  "tokio",
  "tracing",
