@@ -52,8 +52,6 @@ fn handle_update(
     join_set: &mut JoinSet<()>,
     update: Update,
 ) {
-    let span = tracing::info_span!("update", id = update.update_id).entered();
-
     let chat = match &update.content {
         UpdateContent::Message(msg) => &*msg.chat,
         UpdateContent::MyChatMember(member) => &member.chat,
@@ -61,15 +59,17 @@ fn handle_update(
             Some(MaybeInaccessibleMessage::InaccessibleMessage(m)) => &m.chat,
             Some(MaybeInaccessibleMessage::Message(m)) => &m.chat,
             None => {
-                tracing::warn!("Unsupported message!");
+                tracing::warn!(id=update.update_id, from=query.from.id, "Received callback query without message");
                 return;
             }
         },
         _ => {
-            tracing::warn!("Received unsupported update: {:?}", update.content);
+            tracing::warn!(id=update.update_id, "Received unsupported update");
             return;
         }
     };
+
+    let span = tracing::error_span!("update", id = update.update_id, chat=chat.id).entered();
 
     let mutex = mutexes
         .get(&chat.id)
