@@ -30,6 +30,7 @@ use futures_util::stream::{FusedStream, FuturesUnordered, Stream, StreamExt as _
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
+use tracing::instrument;
 
 use super::ChatId;
 use crate::response::RequestError;
@@ -38,8 +39,9 @@ const BROADCASTS_PER_SECOND: f32 = 30.;
 const MESSAGE_INTERVAL_CHAT: Duration = Duration::from_secs(1);
 const MESSAGE_INTERVAL_GROUP: Duration = Duration::from_secs(3);
 
-enum ChatStatus<B: Backend> {
-    Processed(B::UpdateId),
+#[derive(Debug)]
+enum ChatStatus<U> {
+    Processed(U),
     OutOfSync,
     Stopped,
     ShuttingDown,
@@ -54,7 +56,10 @@ fn delay(chat_id: ChatId) -> Duration {
     }
 }
 
-type OneshotResponse<B> = (Result<ChatStatus<B>, <B as Backend>::Error>, bool);
+type OneshotResponse<B> = (
+    Result<ChatStatus<<B as Backend>::UpdateId>, <B as Backend>::Error>,
+    bool,
+);
 type SendMessage<B> = (ScheduledMessage<B>, oneshot::Sender<OneshotResponse<B>>);
 
 pub enum NextUpdate<B: Backend> {
@@ -129,11 +134,7 @@ impl<B: Backend> ScheduledMessage<B> {
             .unacknowledge(self.chat_id, self.update)
             .await?;
         if !r {
-            log::warn!(
-                "Failed to unacknowledge message {:?} for chat {}",
-                self.update,
-                self.chat_id
-            );
+            tracing::warn!("Failed to unacknowledge message!");
         }
         Ok(r)
     }
@@ -143,11 +144,11 @@ impl<B: Backend> ScheduledMessage<B> {
         shared: &SharedDependencies<B>,
         response: Result<(), frankenstein::Error>,
         backoff: Option<Duration>,
-    ) -> Result<ControlFlow<ChatStatus<B>, Duration>, B::Error> {
+    ) -> Result<ControlFlow<ChatStatus<B::UpdateId>, Duration>, B::Error> {
         if let Err(e) = response.as_ref() {
-            log::warn!("Failed to send message: {e}");
+            tracing::error!(error=%e, "Sending message failed");
         } else {
-            log::info!("Message has been sent!");
+            tracing::info!("Message has been sent!");
         }
 
         macro_rules! retry_with_backoff {
@@ -165,14 +166,14 @@ impl<B: Backend> ScheduledMessage<B> {
         let result = match response {
             Ok(_) => ChatStatus::Processed(self.update),
             Err(RequestError::InvalidToken) => {
-                log::error!("Invalid token! Was it revoked?");
+                tracing::error!("Invalid token! Was it revoked?");
                 shared.hard_shutdown.send_replace(true);
                 _ = self.unacknowledge(shared).await?;
                 ChatStatus::ShuttingDown
             }
             Err(RequestError::BotBlocked) => {
                 shared.backend.remove_chat(self.chat_id).await?;
-                log::info!("Bot is unable to send to this chat, subscription was removed!");
+                tracing::info!("Bot is unable to send to this chat, subscription was removed!");
                 ChatStatus::Stopped
             }
             Err(RequestError::ChatMigrated(new_chat_id)) => {
@@ -181,19 +182,19 @@ impl<B: Backend> ScheduledMessage<B> {
                     .backend
                     .migrate_chat(self.chat_id, new_chat_id)
                     .await?;
-                log::info!("Chat has been migrated to {new_chat_id}!");
+                tracing::info!("Chat has been migrated to {new_chat_id}!");
                 ChatStatus::MigratedTo(new_chat_id)
             }
             Err(RequestError::RetryAfter(dur)) => retry_with_backoff!(dur),
             Err(RequestError::ClientError) => {
-                log::error!("Client error, won't retry!");
+                tracing::error!("Client error, won't retry!");
                 ChatStatus::Processed(self.update)
             }
             Err(RequestError::Other) => {
                 if let Some(backoff) = backoff {
                     retry_with_backoff!(backoff)
                 } else {
-                    log::error!("Max number of retries reached, won't retry!");
+                    tracing::error!("Max number of retries reached, won't retry!");
                     ChatStatus::Processed(self.update)
                 }
             }
@@ -203,22 +204,26 @@ impl<B: Backend> ScheduledMessage<B> {
     }
 
     /// Sends a message. Will retry a number of times if it fails
+    #[tracing::instrument(skip_all, fields(chat_id=self.chat_id, update_id=?self.update))]
     async fn send_message(
         &self,
         shared: &SharedDependencies<B>,
         message_sent: &mut bool,
-    ) -> Result<ChatStatus<B>, B::Error> {
+    ) -> Result<ChatStatus<B::UpdateId>, B::Error> {
         let mut backoff = backoff_strategy();
 
         loop {
+            tracing::debug!("Starting attempt to send message!");
             *message_sent = false;
             let ack = shared
                 .backend
                 .acknowledge(self.chat_id, self.update)
                 .await?;
             if !ack {
+                tracing::warn!("Failed to acknowledged message!");
                 return Ok(ChatStatus::OutOfSync);
             }
+            tracing::trace!("Message was acknowledged, trying to send it!");
             let response = shared.backend.send(self.chat_id, &self.message).await;
             *message_sent = true;
 
@@ -226,18 +231,26 @@ impl<B: Backend> ScheduledMessage<B> {
                 .handle_response(shared, response, backoff.next())
                 .await?
             {
-                ControlFlow::Break(result) => return Ok(result),
-                ControlFlow::Continue(retry_after) => sleep(retry_after).await,
+                ControlFlow::Break(result) => {
+                    tracing::debug!("Message was sent or failed definitely");
+                    return Ok(result);
+                }
+                ControlFlow::Continue(retry_after) => {
+                    tracing::info!("Retrying in {retry_after:?} ...");
+                    sleep(retry_after).await;
+                }
             }
         }
     }
 }
 
 /// Process the next entry of the message stream for a certain chat
+#[instrument(skip(shared), ret(level = "debug"))]
 async fn process_next_update<B: Backend>(
     shared: &SharedDependencies<B>,
     chat_id: ChatId,
-) -> Result<ChatStatus<B>, B::Error> {
+) -> Result<ChatStatus<B::UpdateId>, B::Error> {
+    tracing::debug!("Processing next update");
     let started = Instant::now();
 
     let (update, message) = match shared.backend.next_update(chat_id).await? {
@@ -261,6 +274,7 @@ async fn process_next_update<B: Backend>(
     match oneshot_rx.await {
         Ok((r, true)) => {
             // message has been sent, apply a delay for rate limiting
+            tracing::debug!("Applying delay for rate limiting");
             sleep_until(started + delay(chat_id)).await;
             r
         }
@@ -329,6 +343,7 @@ impl<'a, B: Backend, Fut, F: Fn(&'a SharedDependencies<B>, ChatId) -> Fut>
     fn trigger_chat(&mut self, chat_id: ChatId) {
         match self.states.entry(chat_id) {
             Entry::Occupied(mut entry) => {
+                tracing::debug!("Triggered chat {chat_id} already running");
                 entry.get_mut().triggered_while_running = true;
             }
             Entry::Vacant(entry) => {
@@ -341,6 +356,10 @@ impl<'a, B: Backend, Fut, F: Fn(&'a SharedDependencies<B>, ChatId) -> Fut>
 
     /// triggers all active chats after a new message has arrived
     fn on_message_scheduled(&mut self, id: B::UpdateId, active_chats: Vec<ChatId>) {
+        tracing::info!(
+            active_chats = active_chats.len(),
+            "Latest scheduled message: {id:?}"
+        );
         self.latest_entry_id = Some(id);
 
         for chat_id in active_chats {
@@ -348,13 +367,17 @@ impl<'a, B: Backend, Fut, F: Fn(&'a SharedDependencies<B>, ChatId) -> Fut>
         }
     }
 
-    fn on_processing_finished(&mut self, chat_id: ChatId, result: Result<ChatStatus<B>, B::Error>) {
+    fn on_processing_finished(
+        &mut self,
+        chat_id: ChatId,
+        result: Result<ChatStatus<B::UpdateId>, B::Error>,
+    ) {
         let restart = self
             .states
             .remove(&chat_id)
             .map(|s| s.triggered_while_running)
             .unwrap_or_else(|| {
-                log::warn!("Unexpectedly missing state");
+                tracing::warn!(chat_id, "ProcessingState is missing unexpectedly");
                 true // restart task to be on the safe site
             });
         match result {
@@ -377,7 +400,7 @@ impl<'a, B: Backend, Fut, F: Fn(&'a SharedDependencies<B>, ChatId) -> Fut>
             }
             Ok(ChatStatus::MigratedTo(chat_id)) => self.trigger_chat(chat_id),
             Ok(ChatStatus::ShuttingDown) => (),
-            Err(e) => log::error!("{e}"),
+            Err(e) => tracing::error!(error=%e, "Processing chat failed"),
         }
     }
 }
@@ -409,13 +432,24 @@ async fn broadcast_task(backend: impl Backend, mut shutdown_rx: mpsc::Receiver<S
             biased;
             _ = &mut sender_handle => return,
             signal = shutdown_rx.recv() => match signal {
-                Some(ShutdownSignal::Soft) => soft_shutdown = true,
-                Some(ShutdownSignal::Hard) | None => break
+                Some(ShutdownSignal::Soft) => {
+                    tracing::info!("Received soft shutdown signal");
+                    soft_shutdown = true;
+                }
+                Some(ShutdownSignal::Hard) => {
+                    tracing::info!("Received hard shutdown signal");
+                    break;
+                }
+                None => {
+                    tracing::warn!("Shutdown channel closed unexpectedly");
+                    break;
+                }
             },
             item = updates.next(), if !updates.is_terminated() => {
                 if let Some((id,active_chats)) = item {
                     manager.on_message_scheduled(id, active_chats)
                 } else {
+                    tracing::info!("Scheduled messages stream is terminated, doing soft shutdown");
                     soft_shutdown = true;
                 }
             },

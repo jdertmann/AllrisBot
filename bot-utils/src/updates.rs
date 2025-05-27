@@ -8,14 +8,16 @@ use frankenstein::methods::GetUpdatesParams;
 use frankenstein::types::{
     AllowedUpdate, CallbackQuery, ChatMemberUpdated, MaybeInaccessibleMessage, Message,
 };
-use frankenstein::updates::UpdateContent;
+use frankenstein::updates::{Update, UpdateContent};
 use futures_util::FutureExt;
 use tokio::select;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tracing::Instrument;
 
 const CLEANUP_PERIOD: Duration = Duration::from_secs(300);
+type Mutexes = HashMap<i64, Weak<Mutex<()>>>;
 
 #[allow(unused_variables)]
 pub trait UpdateHandler: Clone + Send + 'static {
@@ -32,7 +34,7 @@ pub trait UpdateHandler: Clone + Send + 'static {
     }
 }
 
-fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>>>) {
+fn cleanup(last_cleanup: &mut Instant, mutexes: &mut Mutexes) {
     let now = Instant::now();
 
     if now - *last_cleanup < CLEANUP_PERIOD {
@@ -44,6 +46,74 @@ fn cleanup(last_cleanup: &mut Instant, mutexes: &mut HashMap<i64, Weak<Mutex<()>
     *last_cleanup = now;
 }
 
+fn handle_update(
+    handler: &impl UpdateHandler,
+    mutexes: &mut Mutexes,
+    join_set: &mut JoinSet<()>,
+    update: Update,
+) {
+    let chat = match &update.content {
+        UpdateContent::Message(msg) => &*msg.chat,
+        UpdateContent::MyChatMember(member) => &member.chat,
+        UpdateContent::CallbackQuery(query) => match &query.message {
+            Some(MaybeInaccessibleMessage::InaccessibleMessage(m)) => &m.chat,
+            Some(MaybeInaccessibleMessage::Message(m)) => &m.chat,
+            None => {
+                tracing::warn!(
+                    id = update.update_id,
+                    from = query.from.id,
+                    "Received callback query without message"
+                );
+                return;
+            }
+        },
+        _ => {
+            tracing::warn!(id = update.update_id, "Received unsupported update");
+            return;
+        }
+    };
+
+    let span = tracing::error_span!("update", id = update.update_id, chat = chat.id).entered();
+
+    let mutex = mutexes
+        .get(&chat.id)
+        .and_then(|weak| weak.upgrade())
+        .unwrap_or_else(|| {
+            let mutex = Default::default();
+            mutexes.insert(chat.id, Arc::downgrade(&mutex));
+            mutex
+        });
+
+    let handler = handler.clone();
+    let mut acquiring = Box::pin(mutex.lock_owned());
+
+    // to ensure correct order, it's necessary to poll the future
+    // once now (to enqueue it in the mutex' fifo queue)
+    let guard = acquiring.as_mut().now_or_never();
+    tracing::trace!(immediately = guard.is_some(), "Acquiring chat mutex");
+
+    let fut = async move {
+        let _guard = if let Some(guard) = guard {
+            guard
+        } else {
+            acquiring.await
+        };
+
+        tracing::trace!("Start handling update");
+
+        match update.content {
+            UpdateContent::Message(msg) => handler.handle_message(msg).await,
+            UpdateContent::MyChatMember(msg) => handler.handle_my_chat_member(msg).await,
+            UpdateContent::CallbackQuery(q) => {
+                handler.handle_callback_query(q).await;
+            }
+            _ => tracing::warn!("Unreachable code reached!"),
+        }
+    };
+
+    join_set.spawn(fut.instrument(span.exit()));
+}
+
 /// Gets new incoming messages and calls `handler` on them, while ensuring that no messages
 /// from the same chat are processed in parallel.
 pub async fn handle_updates<B: AsyncTelegramApi<Error: Display>>(
@@ -52,7 +122,7 @@ pub async fn handle_updates<B: AsyncTelegramApi<Error: Display>>(
     allowed_updates: Vec<AllowedUpdate>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
-    let mut mutexes: HashMap<i64, Weak<Mutex<()>>> = HashMap::new();
+    let mut mutexes = Mutexes::new();
     let mut last_cleanup = Instant::now();
 
     let mut join_set = JoinSet::new();
@@ -74,64 +144,11 @@ pub async fn handle_updates<B: AsyncTelegramApi<Error: Display>>(
                 marked_seen = updates.result.is_empty();
                 for update in updates.result {
                     params.offset = Some(update.update_id as i64 + 1);
-
-                    let chat = match &update.content {
-                        UpdateContent::Message(msg) => &*msg.chat,
-                        UpdateContent::MyChatMember(member) => &member.chat,
-                        UpdateContent::CallbackQuery(query) => match &query.message {
-                            Some(MaybeInaccessibleMessage::InaccessibleMessage(m)) => &m.chat,
-                            Some(MaybeInaccessibleMessage::Message(m)) => &m.chat,
-                            None => {
-                                log::warn!("Unsupported!");
-                                continue;
-                            }
-                        },
-                        _ => {
-                            log::warn!("Received unsupported update: {:?}", update.content);
-                            continue;
-                        }
-                    };
-
-                    let mutex = mutexes
-                        .get(&chat.id)
-                        .and_then(|weak| weak.upgrade())
-                        .unwrap_or_else(|| {
-                            let mutex = Default::default();
-                            mutexes.insert(chat.id, Arc::downgrade(&mutex));
-                            mutex
-                        });
-
-                    let handler = handler.clone();
-                    let mut acquiring = Box::pin(mutex.lock_owned());
-
-                    // to ensure correct order, it's necessary to poll the future
-                    // once now (to enqueue it in the mutex' fifo queue)
-                    let guard = acquiring.as_mut().now_or_never();
-
-                    let fut = async move {
-                        let guard = if let Some(guard) = guard {
-                            guard
-                        } else {
-                            acquiring.await
-                        };
-
-                        match update.content {
-                            UpdateContent::Message(msg) => handler.handle_message(msg).await,
-                            UpdateContent::MyChatMember(msg) => {
-                                handler.handle_my_chat_member(msg).await
-                            }
-                            UpdateContent::CallbackQuery(q) => {
-                                handler.handle_callback_query(q).await;
-                            }
-                            _ => log::warn!("Unreachable code reached!"),
-                        }
-                        drop(guard)
-                    };
-                    join_set.spawn(fut);
+                    handle_update(&handler, &mut mutexes, &mut join_set, update);
                 }
             }
             Err(e) => {
-                log::error!("Error retrieving updates: {}", e);
+                tracing::error!(error = %e, "Error retrieving updates");
                 sleep(Duration::from_secs(5)).await;
             }
         }
@@ -145,7 +162,7 @@ pub async fn handle_updates<B: AsyncTelegramApi<Error: Display>>(
         params.limit = Some(1);
 
         if let Err(e) = bot.get_updates(&params).await {
-            log::error!("Error marking messages as seen: {}", e);
+            tracing::error!(error = %e, "Error marking messages as seen");
         }
     }
 

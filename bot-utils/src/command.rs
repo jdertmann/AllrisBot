@@ -15,7 +15,7 @@ impl CommandParser {
         let pattern = if let Some(username) = username {
             &format!("^/([a-z0-9_]+)(?:@({}))?(?:\\s+(.*))?$", escape(username))
         } else {
-            log::warn!("Bot has no username!");
+            tracing::warn!("No username was given!");
             "^/([a-z0-9_]+)(?:@([a-z0-9_]+))?(?:\\s+(.*))?$"
         };
 
