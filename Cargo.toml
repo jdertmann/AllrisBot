@@ -8,7 +8,7 @@ members = [
 [package]
 name = "allrisbot"
 description = "Telegram bot that notifies users about newly published documents in the Allris 4 council information system"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 repository = "https://github.com/jdertmann/AllrisBot"
 license = "AGPL-3.0-or-later"
