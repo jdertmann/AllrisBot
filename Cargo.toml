@@ -8,7 +8,7 @@ members = [
 [package]
 name = "allrisbot"
 description = "Telegram bot that notifies users about newly published documents in the Allris 4 council information system"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 repository = "https://github.com/jdertmann/AllrisBot"
 license = "AGPL-3.0-or-later"
@@ -17,12 +17,11 @@ license = "AGPL-3.0-or-later"
 bot-utils = { path = "bot-utils" }
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
-env_logger = "0.11"
-frankenstein = { version = "0.40.0", features = ["client-reqwest"] }
+frankenstein = { version = "0.41.0", features = ["client-reqwest"] }
 futures-util = { default-features = false, version = "0.3" }
 log = "0.4"
 rand = "0.9.0"
-redis = { version = "0.30", default-features = false, features = ["keep-alive", "tokio-comp", "script", "json"] }
+redis = { version = "0.31", default-features = false, features = ["keep-alive", "tokio-comp", "script", "json"] }
 regex = "1.11.1"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls"] }
 scraper = { version = "0.23", default-features = false }
@@ -33,4 +32,5 @@ thiserror = "2"
 tokio = { version = "1.39", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-retry = "0.3"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "tracing-log"] }
 url = { version = "2.5", features = ["serde"] }
