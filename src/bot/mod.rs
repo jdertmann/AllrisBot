@@ -449,7 +449,7 @@ impl HandleMessage<'_> {
 pub struct ArcMessageHandler(Arc<MessageHandler>);
 
 impl UpdateHandler for ArcMessageHandler {
-    async fn handle_message(self, message: Message) {
+    async fn handle_message(self, message: Box<Message>) {
         HandleMessage {
             message: &message,
             inner: &self.0,

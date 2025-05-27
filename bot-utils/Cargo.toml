@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-frankenstein = { version = "0.40", features = ["trait-async"] }
+frankenstein = { version = "0.41", features = ["trait-async"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 regex = "1.11.1"
 tokio = { version = "1.44.2", features = ["sync", "time", "rt-multi-thread", "macros"] }

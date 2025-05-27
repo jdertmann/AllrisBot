@@ -21,7 +21,7 @@ type Mutexes = HashMap<i64, Weak<Mutex<()>>>;
 
 #[allow(unused_variables)]
 pub trait UpdateHandler: Clone + Send + 'static {
-    fn handle_message(self, message: Message) -> impl Future<Output = ()> + Send {
+    fn handle_message(self, message: Box<Message>) -> impl Future<Output = ()> + Send {
         async {}
     }
 
@@ -29,7 +29,7 @@ pub trait UpdateHandler: Clone + Send + 'static {
         async {}
     }
 
-    fn handle_callback_query(self, update: CallbackQuery) -> impl Future<Output = ()> + Send {
+    fn handle_callback_query(self, update: Box<CallbackQuery>) -> impl Future<Output = ()> + Send {
         async {}
     }
 }
