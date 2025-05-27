@@ -26,39 +26,17 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use frankenstein::Error as RequestError;
-use frankenstein::response::{ErrorResponse, ResponseParameters};
-use futures_util::future::{Fuse, FusedFuture};
-use futures_util::stream::{FusedStream, FuturesUnordered, StreamExt as _};
-use futures_util::{FutureExt, Stream};
+use futures_util::stream::{FusedStream, FuturesUnordered, Stream, StreamExt as _};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep, sleep_until};
 
 use super::ChatId;
+use crate::response::RequestError;
 
 const BROADCASTS_PER_SECOND: f32 = 30.;
 const MESSAGE_INTERVAL_CHAT: Duration = Duration::from_secs(1);
 const MESSAGE_INTERVAL_GROUP: Duration = Duration::from_secs(3);
-
-/// error messages that imply we're not allowed to send messages
-/// to this chat in the future.
-const TELEGRAM_ERRORS: [&str; 14] = [
-    "Bad Request: CHAT_WRITE_FORBIDDEN",
-    "Bad Request: TOPIC_CLOSED",
-    "Bad Request: chat not found",
-    "Bad Request: have no rights to send a message",
-    "Bad Request: not enough rights to send text messages to the chat",
-    "Bad Request: need administrator rights in the channel chat",
-    "Forbidden: bot is not a member of the channel chat",
-    "Forbidden: bot is not a member of the supergroup chat",
-    "Forbidden: bot was blocked by the user",
-    "Forbidden: bot was kicked from the channel chat",
-    "Forbidden: bot was kicked from the group chat",
-    "Forbidden: bot was kicked from the supergroup chat",
-    "Forbidden: the group chat was deleted",
-    "Forbidden: user is deactivated",
-];
 
 enum ChatStatus<B: Backend> {
     Processed(B::UpdateId),
@@ -163,11 +141,13 @@ impl<B: Backend> ScheduledMessage<B> {
     async fn handle_response(
         &self,
         shared: &SharedDependencies<B>,
-        response: Result<(), RequestError>,
+        response: Result<(), frankenstein::Error>,
         backoff: Option<Duration>,
     ) -> Result<ControlFlow<ChatStatus<B>, Duration>, B::Error> {
         if let Err(e) = response.as_ref() {
             log::warn!("Failed to send message: {e}");
+        } else {
+            log::info!("Message has been sent!");
         }
 
         macro_rules! retry_with_backoff {
@@ -180,63 +160,43 @@ impl<B: Backend> ScheduledMessage<B> {
             };
         }
 
-        macro_rules! retry {
-            () => {
+        let response = response.as_ref().map_err(crate::response::map_error);
+
+        let result = match response {
+            Ok(_) => ChatStatus::Processed(self.update),
+            Err(RequestError::InvalidToken) => {
+                log::error!("Invalid token! Was it revoked?");
+                shared.hard_shutdown.send_replace(true);
+                _ = self.unacknowledge(shared).await?;
+                ChatStatus::ShuttingDown
+            }
+            Err(RequestError::BotBlocked) => {
+                shared.backend.remove_chat(self.chat_id).await?;
+                log::info!("Bot is unable to send to this chat, subscription was removed!");
+                ChatStatus::Stopped
+            }
+            Err(RequestError::ChatMigrated(new_chat_id)) => {
+                _ = self.unacknowledge(shared).await?;
+                shared
+                    .backend
+                    .migrate_chat(self.chat_id, new_chat_id)
+                    .await?;
+                log::info!("Chat has been migrated to {new_chat_id}!");
+                ChatStatus::MigratedTo(new_chat_id)
+            }
+            Err(RequestError::RetryAfter(dur)) => retry_with_backoff!(dur),
+            Err(RequestError::ClientError) => {
+                log::error!("Client error, won't retry!");
+                ChatStatus::Processed(self.update)
+            }
+            Err(RequestError::Other) => {
                 if let Some(backoff) = backoff {
                     retry_with_backoff!(backoff)
                 } else {
-                    log::error!("Sending failed definitely, not retrying!");
+                    log::error!("Max number of retries reached, won't retry!");
                     ChatStatus::Processed(self.update)
                 }
-            };
-        }
-
-        let result = match response {
-            Ok(()) => ChatStatus::Processed(self.update),
-            Err(RequestError::Api(e)) => match e {
-                ErrorResponse {
-                    error_code: 401 | 404,
-                    ..
-                } => {
-                    log::error!("Invalid token! Was it revoked?");
-                    shared.hard_shutdown.send_replace(true);
-                    _ = self.unacknowledge(shared).await?;
-                    ChatStatus::ShuttingDown
-                }
-                ErrorResponse {
-                    parameters:
-                        Some(ResponseParameters {
-                            migrate_to_chat_id: Some(new_chat_id),
-                            ..
-                        }),
-                    ..
-                } => {
-                    _ = self.unacknowledge(shared).await?;
-                    shared
-                        .backend
-                        .migrate_chat(self.chat_id, new_chat_id)
-                        .await?;
-                    ChatStatus::MigratedTo(new_chat_id)
-                }
-                ErrorResponse {
-                    parameters:
-                        Some(ResponseParameters {
-                            retry_after: Some(secs),
-                            ..
-                        }),
-                    ..
-                } => {
-                    retry_with_backoff!(Duration::from_secs(secs as u64))
-                }
-                ErrorResponse { description, .. }
-                    if TELEGRAM_ERRORS.contains(&description.as_str()) =>
-                {
-                    shared.backend.remove_chat(self.chat_id).await?;
-                    ChatStatus::Stopped
-                }
-                _ => retry!(),
-            },
-            _ => retry!(),
+            }
         };
 
         Ok(ControlFlow::Break(result))
@@ -274,13 +234,13 @@ impl<B: Backend> ScheduledMessage<B> {
 }
 
 /// Process the next entry of the message stream for a certain chat
-async fn try_process_next<B: Backend>(
+async fn process_next_update<B: Backend>(
     shared: &SharedDependencies<B>,
     chat_id: ChatId,
 ) -> Result<ChatStatus<B>, B::Error> {
     let started = Instant::now();
 
-    let (id, message) = match shared.backend.next_update(chat_id).await? {
+    let (update, message) = match shared.backend.next_update(chat_id).await? {
         NextUpdate::Ready { id, msg: next } => (id, next),
         NextUpdate::Skipped { id } => return Ok(ChatStatus::Processed(id)),
         NextUpdate::OutOfSync => return Ok(ChatStatus::OutOfSync),
@@ -292,19 +252,11 @@ async fn try_process_next<B: Backend>(
     // pass the message to the sender task
     let scheduled = ScheduledMessage {
         chat_id,
+        update,
         message,
-        update: id,
     };
     let (oneshot_tx, oneshot_rx) = oneshot::channel();
-
-    if shared
-        .sender_tx
-        .send((scheduled, oneshot_tx))
-        .await
-        .is_err()
-    {
-        return Ok(ChatStatus::ShuttingDown);
-    }
+    _ = shared.sender_tx.send((scheduled, oneshot_tx)).await;
 
     match oneshot_rx.await {
         Ok((r, true)) => {
@@ -446,7 +398,7 @@ async fn broadcast_task(backend: impl Backend, mut shutdown_rx: mpsc::Receiver<S
         latest_entry_id: None,
         states: HashMap::new(),
         process_next_message: |shared, chat_id| async move {
-            let result = try_process_next(shared, chat_id).await;
+            let result = process_next_update(shared, chat_id).await;
             (chat_id, result)
         },
         processing: FuturesUnordered::new(),
@@ -480,13 +432,13 @@ async fn broadcast_task(backend: impl Backend, mut shutdown_rx: mpsc::Receiver<S
 
 pub struct Broadcaster {
     shutdown_tx: mpsc::Sender<ShutdownSignal>,
-    handle: Fuse<JoinHandle<()>>,
+    handle: JoinHandle<()>,
 }
 
 impl Broadcaster {
     pub fn new(backend: impl Backend) -> Self {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(2);
-        let handle = tokio::spawn(broadcast_task(backend, shutdown_rx)).fuse();
+        let handle = tokio::spawn(broadcast_task(backend, shutdown_rx));
         Self {
             shutdown_tx,
             handle,
@@ -496,7 +448,7 @@ impl Broadcaster {
     pub async fn soft_shutdown(&mut self) {
         _ = self.shutdown_tx.send(ShutdownSignal::Soft).await;
 
-        if !self.handle.is_terminated() {
+        if !self.handle.is_finished() {
             _ = (&mut self.handle).await;
         }
     }
@@ -504,7 +456,7 @@ impl Broadcaster {
     pub async fn hard_shutdown(self) {
         _ = self.shutdown_tx.send(ShutdownSignal::Hard).await;
 
-        if !self.handle.is_terminated() {
+        if !self.handle.is_finished() {
             _ = self.handle.await;
         }
     }

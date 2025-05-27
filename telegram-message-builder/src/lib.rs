@@ -534,7 +534,7 @@ mod tests {
 
     use super::{concat, *};
 
-    fn get_entity(entities: &Vec<MessageEntity>) -> &MessageEntity {
+    fn get_entity(entities: &[MessageEntity]) -> &MessageEntity {
         entities.first().expect("expected at least one entity")
     }
 
