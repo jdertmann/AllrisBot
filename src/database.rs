@@ -563,7 +563,11 @@ implement_with_retry! {
         connection,
         chat_id: i64,
     ) -> ChatState {
-        let (last_sent, migrated) = connection.hget(registered_chat_key(chat_id), "last_sent,migrated").await?;
+        let (last_sent, migrated) = redis::cmd("hget")
+            .arg(registered_chat_key(chat_id))
+            .arg("last_sent").arg("migrated")
+            .query_async(connection)
+            .await?;
 
         if let Some(last_sent) = last_sent {
             ChatState::Active {  last_sent }

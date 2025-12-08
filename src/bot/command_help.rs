@@ -109,7 +109,7 @@ fn about_paragraph(owner: Option<&str>) -> impl WriteToMessage {
         msg.writeln(bold("👨‍💻 Mehr Infos & Kontakt"))?;
 
         msg.write(concat!(
-            "Der Quellcode dieses Bots steht unter der Lizenz",
+            "Der Quellcode dieses Bots steht unter der Lizenz ",
             text_link(
                 "https://www.gnu.org/licenses/agpl-3.0.html.en",
                 "GNU AGPL v3"
