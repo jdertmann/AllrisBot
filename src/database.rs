@@ -28,6 +28,8 @@ fn dialogue_key(chat_id: i64) -> String {
 pub enum Error {
     #[error("{0}")]
     Redis(#[from] redis::RedisError),
+    #[error("Parsing: {0}")]
+    RedisParsing(#[from] redis::ParsingError),
     #[error("database timeout")]
     Timeout,
     #[error("regex error: {0}")]
@@ -66,17 +68,12 @@ impl fmt::Display for StreamId {
 
 macro_rules! invalid_type_error {
     ($v:expr,$det:expr) => {
-        return Err(redis::RedisError::from((
-            redis::ErrorKind::TypeError,
-            "Response was of incompatible type",
-            format!("{} (response was {:?})", $det, $v),
-        ))
-        .into())
+        return Err(redis::ParsingError::from(format!("{} (response was {:?})", $det, &$v)).into())
     };
 }
 
 impl redis::FromRedisValue for StreamId {
-    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+    fn from_redis_value(v: redis::Value) -> std::result::Result<Self, redis::ParsingError> {
         macro_rules! try_assign {
             ($(let $assign:pat = $val:expr , else $det:expr ;)+) => {
                 $(let $assign = $val else { invalid_type_error!(v, $det) };)+
@@ -84,9 +81,8 @@ impl redis::FromRedisValue for StreamId {
         }
 
         try_assign! {
-            let redis::Value::BulkString(bytes) = v, else "Stream ID is not a bulk string";
-            let Ok(string) = std::str::from_utf8(bytes), else "Could not convert from string.";
-            let Some((a, b)) = string.split_once('-'), else "Stream ID has invalid format.";
+            let redis::Value::BulkString(bytes) = &v, else "Stream ID is not a bulk string";
+            let Some((a, b)) = std::str::from_utf8(bytes)?.split_once('-'), else "Stream ID has invalid format.";
             let Ok(a) = a.parse(), else "Stream ID has invalid format.";
             let Ok(b) = b.parse(), else "Stream ID has invalid format.";
         }
@@ -105,23 +101,25 @@ impl redis::ToRedisArgs for StreamId {
 }
 
 impl FromRedisValue for Message {
-    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
-        let mut iter = match v.as_map_iter() {
-            Some(iter) => iter,
-            None => invalid_type_error!(v, "stream entry should be map"),
+    fn from_redis_value(v: redis::Value) -> std::result::Result<Self, redis::ParsingError> {
+        let iter = match v.into_map_iter() {
+            Ok(iter) => iter,
+            Err(v) => invalid_type_error!(v, "stream entry should be map"),
         };
 
         let content = iter
-            .find(|(k, _)| matches!(String::from_redis_value(k).as_deref(), Ok("message")))
+            .map(|(k, v)| (String::from_redis_value(k), v))
+            .find(|(k, _)| matches!(k.as_deref(), Ok("message")))
             .map(|(_, v)| v);
 
         let Some(content) = content else {
-            invalid_type_error!(v, "stream entry missing key")
+            return Err("stream entry missing key".into());
         };
 
         let content = String::from_redis_value(content)?;
+        let parsed = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
-        Ok(serde_json::from_str(&content)?)
+        Ok(parsed)
     }
 }
 
@@ -181,7 +179,7 @@ impl DatabaseConnection {
             RetryMethod::RetryImmediately if self.retry_counter == 1 => return Ok(()),
             RetryMethod::WaitAndRetry | RetryMethod::RetryImmediately => {
                 // reconnect once in a while if it doesn't work
-                if self.retry_counter % 3 == 0 {
+                if self.retry_counter.is_multiple_of(3) {
                     self.connection = None;
                 }
             }
@@ -565,7 +563,7 @@ implement_with_retry! {
         connection,
         chat_id: i64,
     ) -> ChatState {
-        let (last_sent, migrated) = connection.hget(registered_chat_key(chat_id), &["last_sent", "migrated"]).await?;
+        let (last_sent, migrated) = connection.hget(registered_chat_key(chat_id), "last_sent,migrated").await?;
 
         if let Some(last_sent) = last_sent {
             ChatState::Active {  last_sent }

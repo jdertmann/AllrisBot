@@ -90,11 +90,11 @@ impl<K: Eq + Hash + Clone, V, E: EvictionStrategy<K>> CacheInner<K, V, E> {
         match self.cache.entry(key) {
             Entry::Occupied(mut entry) => {
                 let cell = entry.get();
-                if let Some(val) = cell.get() {
-                    if !is_valid(val) {
-                        entry.insert(Default::default());
-                        return entry.get().clone();
-                    }
+                if let Some(val) = cell.get()
+                    && !is_valid(val)
+                {
+                    entry.insert(Default::default());
+                    return entry.get().clone();
                 }
 
                 cell.clone()
