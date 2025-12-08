@@ -108,9 +108,17 @@ fn about_paragraph(owner: Option<&str>) -> impl WriteToMessage {
     from_fn(move |msg| {
         msg.writeln(bold("👨‍💻 Mehr Infos & Kontakt"))?;
 
+        msg.write(concat!(
+            "Der Quellcode dieses Bots steht unter der ",
+            text_link(
+                "https://www.gnu.org/licenses/agpl-3.0.html.en",
+                "GNU AGPL 3"
+            ),
+            " zur Verfügung: "
+        ))?;
         write!(
             msg,
-            "Der Quellcode dieses Bots ist öffentlich zugänglich: {} (Version {})",
+            "{} (Version {})",
             env!("CARGO_PKG_REPOSITORY"),
             env!("CARGO_PKG_VERSION")
         )?;
