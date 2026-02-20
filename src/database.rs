@@ -153,6 +153,7 @@ impl DatabaseConnection {
 
     async fn get_connection(&mut self) -> Result<&mut MultiplexedConnection> {
         if self.connection.is_some() {
+            #[allow(clippy::unnecessary_unwrap)]
             Ok(self.connection.as_mut().unwrap())
         } else {
             let connection = self.client.get_multiplexed_async_connection().await?;
