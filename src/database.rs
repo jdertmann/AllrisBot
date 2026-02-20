@@ -155,6 +155,7 @@ impl DatabaseConnection {
 
     async fn get_connection(&mut self) -> Result<&mut MultiplexedConnection> {
         if self.connection.is_some() {
+            #[allow(clippy::unnecessary_unwrap)]
             Ok(self.connection.as_mut().unwrap())
         } else {
             let connection = self.client.get_multiplexed_async_connection().await?;
@@ -181,7 +182,7 @@ impl DatabaseConnection {
             RetryMethod::RetryImmediately if self.retry_counter == 1 => return Ok(()),
             RetryMethod::WaitAndRetry | RetryMethod::RetryImmediately => {
                 // reconnect once in a while if it doesn't work
-                if self.retry_counter % 3 == 0 {
+                if self.retry_counter.is_multiple_of(3) {
                     self.connection = None;
                 }
             }
