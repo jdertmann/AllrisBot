@@ -79,7 +79,7 @@ fn endpoint_url<T: TimeZone>(
     since: DateTime<T>,
     until: Option<DateTime<T>>,
 ) -> Url {
-    let mut url = url.url.join("oparl/papers").unwrap();
+    let mut url = url.url.join("oparl/bodies/1/papers").unwrap();
 
     {
         let mut query_pairs = url.query_pairs_mut();
