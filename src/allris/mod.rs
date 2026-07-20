@@ -49,7 +49,7 @@ async fn http_request<T>(
     let retry_condition =
         |e: &reqwest::Error| !matches!(e.status(), Some(status) if !status.is_server_error());
 
-    RetryIf::spawn(retry_strategy, action, retry_condition).await
+    RetryIf::start(retry_strategy, action, retry_condition).await
 }
 
 fn generate_tags(dsnr: Option<&str>, paper: &Paper, data: &WebsiteData) -> Vec<(Tag, String)> {

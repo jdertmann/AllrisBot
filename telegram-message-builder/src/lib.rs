@@ -532,7 +532,7 @@ mod tests {
     use std::fmt::Debug;
     use std::hint::black_box;
 
-    use super::{concat, *};
+    use super::*;
 
     fn get_entity(entities: &[MessageEntity]) -> &MessageEntity {
         entities.first().expect("expected at least one entity")
